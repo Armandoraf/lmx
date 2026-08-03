@@ -14,7 +14,11 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "native.js", "native.d.ts"],
+  "files": [
+    "dist",
+    "native.js",
+    "native.d.ts"
+  ],
   "scripts": {
     "build": "npm run build:native && tsc -p tsconfig.json",
     "build:native": "napi build --platform --release --manifest-path ../crates/lmx-node/Cargo.toml --output-dir . --js native.js --dts native.d.ts --esm",
@@ -41,5 +45,11 @@
     "@napi-rs/cli": "^3.6.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "@armandoraf/lmx-darwin-arm64": "0.1.0",
+    "@armandoraf/lmx-darwin-x64": "0.1.0",
+    "@armandoraf/lmx-linux-x64-gnu": "0.1.0",
+    "@armandoraf/lmx-linux-arm64-gnu": "0.1.0"
   }
 }
