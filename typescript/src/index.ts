@@ -8,12 +8,16 @@ type Native = {
   loadRequestContextJson(provider: string): string;
   buildMessageItemJson(role: string, text: string): string;
   outputTextFromItemsJson(items: string): string;
+  normalizeToolOutputJson(callId: string, value: string): string;
+  toolFailureOutputJson(callId: string, error: string): string;
   buildWireRequestJson(request: string): string;
   generateImageJson(request: string): Promise<string>;
   generateVideoJson(request: string): Promise<string>;
   ResponseSession: new (request: string) => {
     executeRoundJson(): Promise<string>;
     submitToolOutputsJson(outputs: string): string;
+    startRound(): void;
+    nextFrameJson(): Promise<string>;
   };
 };
 
@@ -94,6 +98,14 @@ export const generateVideo = async (request: Record<string, unknown>): Promise<V
 type ToolHandler = (arguments_: Record<string, unknown>) => unknown | Promise<unknown>;
 type ResponseRequest = Record<string, unknown> & { toolHandlers?: Record<string, ToolHandler> };
 
+function normalizeToolOutput(callId: string, value: unknown): Record<string, unknown> {
+  return JSON.parse(core.normalizeToolOutputJson(callId, JSON.stringify(value))) as Record<string, unknown>;
+}
+
+function toolFailureOutput(callId: string, error: string): Record<string, unknown> {
+  return JSON.parse(core.toolFailureOutputJson(callId, error)) as Record<string, unknown>;
+}
+
 export async function* streamResponse(request: ResponseRequest): AsyncGenerator<Record<string, unknown>> {
   const { toolHandlers = {}, ...payload } = request;
   if (!payload.context && typeof payload.provider === 'string') {
@@ -102,38 +114,42 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
   }
   const session = new core.ResponseSession(JSON.stringify(payload));
   while (true) {
-    const round = JSON.parse(await session.executeRoundJson()) as {
-      events: Record<string, unknown>[];
-      next: Record<string, unknown>;
-    };
-    for (const event of round.events) yield event;
-    if (round.next.type === 'completed') {
-      yield { type: 'completed', ...(round.next.result as Record<string, unknown>) };
+    session.startRound();
+    let next: Record<string, unknown>;
+    while (true) {
+      const frame = JSON.parse(await session.nextFrameJson()) as {
+        type: string;
+        event?: Record<string, unknown>;
+        next?: Record<string, unknown>;
+        error?: string;
+      };
+      if (frame.type === 'event') {
+        yield frame.event!;
+        continue;
+      }
+      if (frame.type === 'failed') throw new Error(frame.error);
+      next = frame.next!;
+      break;
+    }
+    if (next.type === 'completed') {
+      yield { type: 'completed', ...(next.result as Record<string, unknown>) };
       return;
     }
-    const calls = round.next.calls as Array<{ name: string; callId: string; arguments: Record<string, unknown> }>;
+    const calls = next.calls as Array<{ name: string; callId: string; arguments: Record<string, unknown> }>;
     const outputs: Array<Record<string, unknown>> = [];
     for (const call of calls) {
       yield { type: 'tool_call_started', ...call };
-      let result: unknown;
-      let content: unknown;
+      let output: Record<string, unknown>;
       try {
         const value = toolHandlers[call.name]
           ? await toolHandlers[call.name](call.arguments)
           : { ok: false, error: `unknown function tool: ${call.name}` };
-        if (value && typeof value === 'object' && (value as { type?: string }).type === 'content') {
-          result = (value as { result: unknown }).result;
-          content = (value as { content: unknown }).content;
-        } else {
-          result = value && typeof value === 'object' && (value as { type?: string }).type === 'json'
-            ? (value as { result: unknown }).result
-            : value;
-        }
+        output = normalizeToolOutput(call.callId, value);
       } catch (error) {
-        result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+        output = toolFailureOutput(call.callId, error instanceof Error ? error.message : String(error));
       }
-      outputs.push({ callId: call.callId, result, ...(content === undefined ? {} : { content }) });
-      yield { type: 'tool_call_completed', name: call.name, callId: call.callId, result };
+      outputs.push(output);
+      yield { type: 'tool_call_completed', name: call.name, callId: call.callId, result: output.result };
     }
     session.submitToolOutputsJson(JSON.stringify(outputs));
   }

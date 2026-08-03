@@ -34,12 +34,15 @@ impl OpenAiTransport {
         Self { client }
     }
 
-    /// Read an SSE response into decoded Responses API events.
+    /// Decode an SSE response incrementally.
     ///
     /// Keeping the decoded events as JSON makes the boundary stable for all
     /// provider-specific event shapes while normalization remains in
     /// `ResponseMachine`.
-    pub async fn stream_round(&self, wire: WireRequest) -> Result<Vec<Value>> {
+    pub async fn stream_round<F>(&self, wire: WireRequest, mut on_event: F) -> Result<()>
+    where
+        F: FnMut(Value) -> Result<()>,
+    {
         let mut request = self.client.post(&wire.url).json(&wire.body);
         for (name, value) in &wire.headers {
             request = request.header(name, value);
@@ -54,14 +57,13 @@ impl OpenAiTransport {
         }
 
         let mut source = response.bytes_stream().eventsource();
-        let mut events = Vec::new();
         while let Some(next) = source.next().await {
             let event = next.map_err(|error| Error::Transport(error.to_string()))?;
             if event.data == "[DONE]" || event.data.trim().is_empty() {
                 continue;
             }
-            events.push(serde_json::from_str(&event.data)?);
+            on_event(serde_json::from_str(&event.data)?)?;
         }
-        Ok(events)
+        Ok(())
     }
 }

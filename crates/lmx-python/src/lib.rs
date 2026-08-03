@@ -1,10 +1,13 @@
 use lmx_core::{
-    ImageRequest, ProviderRegistry, ResponseMachine, ResponseRequest, ToolOutput, VERSION,
-    VideoRequest, build_message_item, execute_round, generate_image, generate_video,
-    load_request_context, output_text_from_items,
+    ImageRequest, ProviderRegistry, ResponseFrame, ResponseMachine, ResponseRequest, ToolOutput,
+    VERSION, VideoRequest, build_message_item, execute_round, execute_round_with_observer,
+    generate_image, generate_video, load_request_context, normalize_tool_output,
+    output_text_from_items, tool_failure_output,
 };
 use pyo3::prelude::*;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, mpsc};
+
+type FrameReceiver = Arc<Mutex<mpsc::Receiver<ResponseFrame>>>;
 
 fn api_error(error: impl std::fmt::Display) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(error.to_string())
@@ -36,6 +39,17 @@ fn output_text_from_items_json(items_json: &str) -> PyResult<String> {
     let items: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_json::from_str(items_json).map_err(api_error)?;
     Ok(output_text_from_items(&items))
+}
+
+#[pyfunction]
+fn normalize_tool_output_json(call_id: &str, value_json: &str) -> PyResult<String> {
+    let value = serde_json::from_str(value_json).map_err(api_error)?;
+    serde_json::to_string(&normalize_tool_output(call_id, value)).map_err(api_error)
+}
+
+#[pyfunction]
+fn tool_failure_output_json(call_id: &str, error: &str) -> PyResult<String> {
+    serde_json::to_string(&tool_failure_output(call_id, error)).map_err(api_error)
 }
 
 /// Build the exact request that LMX's Rust engine would send. The Python
@@ -80,7 +94,8 @@ fn generate_video_json(request_json: &str) -> PyResult<String> {
 
 #[pyclass]
 struct ResponseSession {
-    machine: Mutex<ResponseMachine>,
+    machine: Arc<Mutex<Option<ResponseMachine>>>,
+    frames: Mutex<Option<FrameReceiver>>,
 }
 
 #[pymethods]
@@ -89,9 +104,10 @@ impl ResponseSession {
     fn new(request_json: &str) -> PyResult<Self> {
         let request: ResponseRequest = serde_json::from_str(request_json).map_err(api_error)?;
         Ok(Self {
-            machine: Mutex::new(
+            machine: Arc::new(Mutex::new(Some(
                 ResponseMachine::new(&ProviderRegistry::default(), request).map_err(api_error)?,
-            ),
+            ))),
+            frames: Mutex::new(None),
         })
     }
 
@@ -101,9 +117,12 @@ impl ResponseSession {
             .build()
             .map_err(api_error)?;
         let mut machine = self.machine.lock().map_err(api_error)?;
+        let machine = machine
+            .as_mut()
+            .ok_or_else(|| api_error("response session is already executing"))?;
         serde_json::to_string(
             &runtime
-                .block_on(execute_round(&mut machine))
+                .block_on(execute_round(machine))
                 .map_err(api_error)?,
         )
         .map_err(api_error)
@@ -112,8 +131,84 @@ impl ResponseSession {
     fn submit_tool_outputs_json(&self, outputs_json: &str) -> PyResult<String> {
         let outputs: Vec<ToolOutput> = serde_json::from_str(outputs_json).map_err(api_error)?;
         let mut machine = self.machine.lock().map_err(api_error)?;
+        let machine = machine
+            .as_mut()
+            .ok_or_else(|| api_error("response session is already executing"))?;
         serde_json::to_string(&machine.submit_tool_outputs(outputs).map_err(api_error)?)
             .map_err(api_error)
+    }
+
+    fn start_round(&self) -> PyResult<()> {
+        let machine = self
+            .machine
+            .lock()
+            .map_err(api_error)?
+            .take()
+            .ok_or_else(|| api_error("response session is already executing"))?;
+        let mut frames = self.frames.lock().map_err(api_error)?;
+        if frames.is_some() {
+            return Err(api_error("response session already has a running stream"));
+        }
+        let (sender, receiver) = mpsc::channel();
+        *frames = Some(Arc::new(Mutex::new(receiver)));
+        let machine_slot = Arc::clone(&self.machine);
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    if let Ok(mut slot) = machine_slot.lock() {
+                        *slot = Some(machine);
+                    }
+                    let _ = sender.send(ResponseFrame::Failed {
+                        error: error.to_string(),
+                    });
+                    return;
+                }
+            };
+            let mut machine = machine;
+            let result = runtime.block_on(execute_round_with_observer(&mut machine, |event| {
+                let _ = sender.send(ResponseFrame::Event { event });
+            }));
+            if let Ok(mut slot) = machine_slot.lock() {
+                *slot = Some(machine);
+            }
+            let frame = match result {
+                Ok(next) => ResponseFrame::Ready { next },
+                Err(error) => ResponseFrame::Failed {
+                    error: error.to_string(),
+                },
+            };
+            let _ = sender.send(frame);
+        });
+        Ok(())
+    }
+
+    fn next_frame_json(&self, py: Python<'_>) -> PyResult<String> {
+        let receiver = self.frames.lock().map_err(api_error)?.take();
+        let Some(receiver) = receiver else {
+            return Err(api_error("response session has no running stream"));
+        };
+        let worker = Arc::clone(&receiver);
+        let frame = py
+            .detach(move || {
+                worker
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .recv()
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(api_error)?;
+        let terminal = matches!(
+            frame,
+            ResponseFrame::Ready { .. } | ResponseFrame::Failed { .. }
+        );
+        if !terminal {
+            *self.frames.lock().map_err(api_error)? = Some(receiver);
+        }
+        serde_json::to_string(&frame).map_err(api_error)
     }
 }
 
@@ -124,6 +219,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(load_request_context_json, module)?)?;
     module.add_function(wrap_pyfunction!(build_message_item_json, module)?)?;
     module.add_function(wrap_pyfunction!(output_text_from_items_json, module)?)?;
+    module.add_function(wrap_pyfunction!(normalize_tool_output_json, module)?)?;
+    module.add_function(wrap_pyfunction!(tool_failure_output_json, module)?)?;
     module.add_function(wrap_pyfunction!(build_wire_request_json, module)?)?;
     module.add_function(wrap_pyfunction!(generate_image_json, module)?)?;
     module.add_function(wrap_pyfunction!(generate_video_json, module)?)?;

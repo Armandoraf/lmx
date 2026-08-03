@@ -4,6 +4,8 @@ export declare class ResponseSession {
   constructor(requestJson: string)
   executeRoundJson(): Promise<string>
   submitToolOutputsJson(outputsJson: string): string
+  startRound(): void
+  nextFrameJson(): Promise<string>
 }
 
 export declare function buildMessageItemJson(role: string, text: string): string
@@ -16,8 +18,12 @@ export declare function generateVideoJson(requestJson: string): Promise<string>
 
 export declare function loadRequestContextJson(providerJson: string): string
 
+export declare function normalizeToolOutputJson(callId: string, valueJson: string): string
+
 export declare function outputTextFromItemsJson(itemsJson: string): string
 
 export declare function providerRegistryJson(): string
+
+export declare function toolFailureOutputJson(callId: string, error: string): string
 
 export declare function version(): string

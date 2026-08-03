@@ -16,6 +16,7 @@ lmx-core = { path = "../lmx-core" }
 napi = { version = "3.4.0", default-features = false, features = ["napi6", "tokio_rt"] }
 napi-derive = "3.3.0"
 serde_json.workspace = true
+tokio.workspace = true
 
 [build-dependencies]
 napi-build = "2.2.4"

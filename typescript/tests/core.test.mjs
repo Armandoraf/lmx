@@ -43,6 +43,30 @@ test('the Rust response engine preserves tool-round state', async () => {
   assert.equal(requests[1].input.at(-1).output, '{"sum":5}');
 });
 
+test('streamResponse yields a text delta before the SSE stream completes', async () => {
+  let completed = false;
+  await withServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'Hello' })}\n\n`);
+    setTimeout(() => {
+      completed = true;
+      response.end(`data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: { type: 'message', role: 'assistant', content: 'Hello' } })}\n\ndata: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
+    }, 80);
+  }, async baseUrl => {
+    const stream = streamResponse({
+      context: { provider: 'azure', apiKey: 'test', baseUrl },
+      model: 'gpt-5.5',
+      input: [{ type: 'message', role: 'user', content: 'Hello' }]
+    });
+    const first = await stream.next();
+    assert.deepEqual(first.value, { type: 'text_delta', delta: 'Hello' });
+    assert.equal(completed, false);
+    for await (const _event of stream) {
+      // Drain the completed response so the native session can release cleanly.
+    }
+  });
+});
+
 test('the Rust media engine generates OpenAI-compatible image and video requests', async () => {
   await withServer((request, response) => {
     if (request.url === '/images/generations') {

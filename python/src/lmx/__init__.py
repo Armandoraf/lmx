@@ -15,6 +15,8 @@ from ._native import (
     load_request_context_json,
     output_text_from_items_json,
     provider_registry_json,
+    normalize_tool_output_json,
+    tool_failure_output_json,
     version,
 )
 
@@ -79,13 +81,11 @@ def generate_video(request: dict[str, Any]) -> dict[str, Any]:
 def _tool_output(call: dict[str, Any], handler: Any) -> tuple[dict[str, Any], Any]:
     try:
         result = handler(call.get("arguments", {}))
-        if isinstance(result, dict) and result.get("type") == "content":
-            return {"callId": call["callId"], "result": result.get("result"), "content": result.get("content")}, result.get("result")
-        value = result.get("result") if isinstance(result, dict) and result.get("type") == "json" else result
-        return {"callId": call["callId"], "result": value}, value
+        output = json.loads(normalize_tool_output_json(call["callId"], json.dumps(result)))
+        return output, output["result"]
     except Exception as error:  # Tool failures are model-visible outputs, not engine failures.
-        value = {"ok": False, "error": str(error)}
-        return {"callId": call["callId"], "result": value}, value
+        output = json.loads(tool_failure_output_json(call["callId"], str(error)))
+        return output, output["result"]
 
 
 def stream_response(request: dict[str, Any]):
@@ -96,10 +96,16 @@ def stream_response(request: dict[str, Any]):
         payload["context"] = load_request_context(str(payload.pop("provider")))
     session = ResponseSession(json.dumps(payload))
     while True:
-        round_result = json.loads(session.execute_round_json())
-        for event in round_result["events"]:
-            yield event
-        action = round_result["next"]
+        session.start_round()
+        while True:
+            frame = json.loads(session.next_frame_json())
+            if frame["type"] == "event":
+                yield frame["event"]
+                continue
+            if frame["type"] == "failed":
+                raise RuntimeError(frame["error"])
+            action = frame["next"]
+            break
         if action["type"] == "completed":
             result = action["result"]
             yield {"type": "completed", **result}
@@ -109,7 +115,7 @@ def stream_response(request: dict[str, Any]):
             yield {"type": "tool_call_started", **call}
             handler = handlers.get(call["name"])
             if handler is None:
-                output = {"callId": call["callId"], "result": {"ok": False, "error": f"unknown function tool: {call['name']}"}}
+                output = json.loads(tool_failure_output_json(call["callId"], f"unknown function tool: {call['name']}"))
                 observed = output["result"]
             else:
                 output, observed = _tool_output(call, handler)

@@ -1,0 +1,10 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+# Maturin resolves this relative to the Cargo manifest.  Keeping the binding
+# crate in `crates/` and the published package in `python/` preserves the
+# repository boundary while packaging `lmx._native` beside its Python facade.
+python-source = "../../python/src"
+module-name = "lmx._native"

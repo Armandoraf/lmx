@@ -4,7 +4,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{Error, RequestContext, Result, prompt_for_chroma_key, remove_chroma_key_background};
+use crate::{
+    Error, RequestContext, Result, endpoint_url, prompt_for_chroma_key,
+    remove_chroma_key_background,
+};
 
 const OPENAI_SIZES: &[&str] = &["1024x1024", "1536x1024", "1024x1536"];
 const NANOGPT_SIZES: &[&str] = &["1024x1024"];
@@ -129,7 +132,7 @@ fn request_url(context: &RequestContext, fallback: &str, route: &str) -> Result<
     if base.is_empty() {
         return Err(Error::MissingBaseUrl(context.provider.as_str().into()));
     }
-    Ok(format!("{}/images/{route}", base.trim_end_matches('/')))
+    endpoint_url(base, &format!("images/{route}"), &context.query)
 }
 
 pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
@@ -218,10 +221,10 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
                 if chroma_key { "opaque" } else { background }.to_owned(),
             );
         }
-        if let Some(fidelity) = &request.input_fidelity {
-            if !is_gpt_image_2(&model) {
-                form = form.text("input_fidelity", fidelity.clone());
-            }
+        if let Some(fidelity) = &request.input_fidelity
+            && !is_gpt_image_2(&model)
+        {
+            form = form.text("input_fidelity", fidelity.clone());
         }
         for path in &request.input_images {
             let content = std::fs::read(path)

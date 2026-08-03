@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{Error, RequestContext, Result};
+use crate::{Error, RequestContext, Result, endpoint_url};
 
 const SIZES: &[&str] = &["720x1280", "1280x720", "1024x1792", "1792x1024"];
 const SECONDS: &[u32] = &[4, 8, 12];
@@ -88,11 +88,12 @@ fn size(request: &VideoRequest) -> Result<(String, u32, u32)> {
     Ok((size, width, height))
 }
 
-fn base_url(context: &RequestContext) -> Result<&str> {
-    context
+fn endpoint(context: &RequestContext, path: &str) -> Result<String> {
+    let base_url = context
         .base_url
         .as_deref()
-        .ok_or_else(|| Error::MissingBaseUrl(context.provider.as_str().into()))
+        .ok_or_else(|| Error::MissingBaseUrl(context.provider.as_str().into()))?;
+    endpoint_url(base_url, path, &context.query)
 }
 
 async fn checked_json(response: reqwest::Response) -> Result<Value> {
@@ -149,10 +150,7 @@ pub async fn generate_video(request: VideoRequest) -> Result<VideoResult> {
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
     let mut create = client
-        .post(format!(
-            "{}/videos",
-            base_url(&request.context)?.trim_end_matches('/')
-        ))
+        .post(endpoint(&request.context, "videos")?)
         .json(&body);
     create = create
         .header(
@@ -187,10 +185,7 @@ pub async fn generate_video(request: VideoRequest) -> Result<VideoResult> {
         ))
         .await;
         let mut poll = client
-            .get(format!(
-                "{}/videos/{id}",
-                base_url(&request.context)?.trim_end_matches('/')
-            ))
+            .get(endpoint(&request.context, &format!("videos/{id}"))?)
             .header(
                 "Authorization",
                 format!("Bearer {}", request.context.api_key),
@@ -205,10 +200,10 @@ pub async fn generate_video(request: VideoRequest) -> Result<VideoResult> {
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Event("video response did not include an id".into()))?;
     let mut download = client
-        .get(format!(
-            "{}/videos/{id}/content?variant=video",
-            base_url(&request.context)?.trim_end_matches('/')
-        ))
+        .get(endpoint(
+            &request.context,
+            &format!("videos/{id}/content?variant=video"),
+        )?)
         .header(
             "Authorization",
             format!("Bearer {}", request.context.api_key),

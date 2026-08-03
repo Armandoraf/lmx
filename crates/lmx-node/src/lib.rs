@@ -1,11 +1,14 @@
 use lmx_core::{
-    ImageRequest, ProviderRegistry, ResponseMachine, ResponseRequest, ToolOutput, VERSION,
-    VideoRequest, build_message_item, execute_round, generate_image, generate_video,
-    load_request_context, output_text_from_items,
+    ImageRequest, ProviderRegistry, ResponseFrame, ResponseMachine, ResponseRequest, ToolOutput,
+    VERSION, VideoRequest, build_message_item, execute_round, execute_round_with_observer,
+    generate_image, generate_video, load_request_context, normalize_tool_output,
+    output_text_from_items, tool_failure_output,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+
+type FrameReceiver = Arc<Mutex<mpsc::Receiver<ResponseFrame>>>;
 
 fn napi_error(error: impl std::fmt::Display) -> Error {
     Error::from_reason(error.to_string())
@@ -41,6 +44,17 @@ pub fn output_text_from_items_json(items_json: String) -> Result<String> {
 }
 
 #[napi]
+pub fn normalize_tool_output_json(call_id: String, value_json: String) -> Result<String> {
+    let value = serde_json::from_str(&value_json).map_err(napi_error)?;
+    serde_json::to_string(&normalize_tool_output(call_id, value)).map_err(napi_error)
+}
+
+#[napi]
+pub fn tool_failure_output_json(call_id: String, error: String) -> Result<String> {
+    serde_json::to_string(&tool_failure_output(call_id, error)).map_err(napi_error)
+}
+
+#[napi]
 pub fn build_wire_request_json(request_json: String) -> Result<String> {
     let request: ResponseRequest = serde_json::from_str(&request_json).map_err(napi_error)?;
     let machine =
@@ -63,6 +77,7 @@ pub async fn generate_video_json(request_json: String) -> Result<String> {
 #[napi]
 pub struct ResponseSession {
     machine: Arc<Mutex<Option<ResponseMachine>>>,
+    frames: Arc<Mutex<Option<FrameReceiver>>>,
 }
 
 #[napi]
@@ -74,6 +89,7 @@ impl ResponseSession {
             machine: Arc::new(Mutex::new(Some(
                 ResponseMachine::new(&ProviderRegistry::default(), request).map_err(napi_error)?,
             ))),
+            frames: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -99,5 +115,83 @@ impl ResponseSession {
             .ok_or_else(|| Error::from_reason("response session is already executing"))?;
         serde_json::to_string(&machine.submit_tool_outputs(outputs).map_err(napi_error)?)
             .map_err(napi_error)
+    }
+
+    #[napi]
+    pub fn start_round(&self) -> Result<()> {
+        let machine = self
+            .machine
+            .lock()
+            .map_err(napi_error)?
+            .take()
+            .ok_or_else(|| Error::from_reason("response session is already executing"))?;
+        let mut frames = self.frames.lock().map_err(napi_error)?;
+        if frames.is_some() {
+            return Err(Error::from_reason(
+                "response session already has a running stream",
+            ));
+        }
+        let (sender, receiver) = mpsc::channel();
+        *frames = Some(Arc::new(Mutex::new(receiver)));
+        let machine_slot = Arc::clone(&self.machine);
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    if let Ok(mut slot) = machine_slot.lock() {
+                        *slot = Some(machine);
+                    }
+                    let _ = sender.send(ResponseFrame::Failed {
+                        error: error.to_string(),
+                    });
+                    return;
+                }
+            };
+            let mut machine = machine;
+            let result = runtime.block_on(execute_round_with_observer(&mut machine, |event| {
+                let _ = sender.send(ResponseFrame::Event { event });
+            }));
+            if let Ok(mut slot) = machine_slot.lock() {
+                *slot = Some(machine);
+            }
+            let frame = match result {
+                Ok(next) => ResponseFrame::Ready { next },
+                Err(error) => ResponseFrame::Failed {
+                    error: error.to_string(),
+                },
+            };
+            let _ = sender.send(frame);
+        });
+        Ok(())
+    }
+
+    #[napi]
+    pub async fn next_frame_json(&self) -> Result<String> {
+        let receiver = self.frames.lock().map_err(napi_error)?.take();
+        let Some(receiver) = receiver else {
+            return Err(Error::from_reason("response session has no running stream"));
+        };
+        let worker = Arc::clone(&receiver);
+        let frame = tokio::task::spawn_blocking(move || {
+            worker
+                .lock()
+                .map_err(|error| error.to_string())?
+                .recv()
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(napi_error)?
+        .map_err(Error::from_reason)?;
+        let terminal = matches!(
+            frame,
+            ResponseFrame::Ready { .. } | ResponseFrame::Failed { .. }
+        );
+        if !terminal {
+            *self.frames.lock().map_err(napi_error)? = Some(receiver);
+        }
+        serde_json::to_string(&frame).map_err(napi_error)
     }
 }

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::{Error, ProviderRegistry, RequestContext, Result};
+use crate::{Error, ProviderRegistry, RequestContext, Result, endpoint_url};
 
 pub type ResponseItem = Map<String, Value>;
 
@@ -115,11 +115,49 @@ pub struct ToolOutput {
     pub content: Option<Value>,
 }
 
+/// Convert the language-neutral tool result envelope into the one Responses
+/// input item the next provider round requires.  SDK adapters call this rather
+/// than independently deciding how `json`, multimodal `content`, and ordinary
+/// values are represented.
+pub fn normalize_tool_output(call_id: impl Into<String>, value: Value) -> ToolOutput {
+    let call_id = call_id.into();
+    let (result, content) = match &value {
+        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("content") => (
+            object.get("result").cloned().unwrap_or(Value::Null),
+            object.get("content").cloned(),
+        ),
+        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("json") => {
+            (object.get("result").cloned().unwrap_or(Value::Null), None)
+        }
+        _ => (value, None),
+    };
+    ToolOutput {
+        call_id,
+        result,
+        content,
+    }
+}
+
+pub fn tool_failure_output(call_id: impl Into<String>, error: impl Into<String>) -> ToolOutput {
+    normalize_tool_output(call_id, json!({"ok": false, "error": error.into()}))
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NextAction {
     ToolCalls { calls: Vec<ToolCall> },
     Completed { result: ResponseResult },
+}
+
+/// A binding-friendly frame emitted by a response session.  Events are sent
+/// immediately; `ready` marks the point where a host may run tools or return a
+/// completed result.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFrame {
+    Event { event: CoreEvent },
+    Ready { next: NextAction },
+    Failed { error: String },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -138,6 +176,7 @@ pub struct ResponseMachine {
     running_input: Vec<ResponseItem>,
     accumulated_items: Vec<ResponseItem>,
     round_items: BTreeMap<usize, ResponseItem>,
+    round_completed: bool,
     tool_roundtrips: u8,
     completed: bool,
 }
@@ -178,6 +217,7 @@ impl ResponseMachine {
             model,
             accumulated_items: Vec::new(),
             round_items: BTreeMap::new(),
+            round_completed: false,
             tool_roundtrips: 0,
             completed: false,
         })
@@ -217,34 +257,9 @@ impl ResponseMachine {
         if let Some(effort) = &self.request.reasoning_effort {
             body["reasoning"] = json!({"effort": effort, "summary": null});
         }
-        let mut url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        if !self.request.context.query.is_empty() {
-            let query = self
-                .request
-                .context
-                .query
-                .iter()
-                .map(|(key, value)| {
-                    format!(
-                        "{}={}",
-                        percent_encoding::utf8_percent_encode(
-                            key,
-                            percent_encoding::NON_ALPHANUMERIC
-                        ),
-                        percent_encoding::utf8_percent_encode(
-                            value,
-                            percent_encoding::NON_ALPHANUMERIC
-                        )
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("&");
-            url.push('?');
-            url.push_str(&query);
-        }
         Ok(WireRequest {
             method: "POST".into(),
-            url,
+            url: endpoint_url(&self.base_url, "responses", &self.request.context.query)?,
             headers,
             body,
         })
@@ -260,6 +275,19 @@ impl ResponseMachine {
             .clone()
             .unwrap_or_else(|| self.base_url.clone());
         self.request.context = context;
+    }
+
+    fn begin_round(&mut self) -> Result<()> {
+        if self.completed {
+            return Err(Error::State("response is already complete".into()));
+        }
+        if !self.round_items.is_empty() {
+            return Err(Error::State(
+                "response round has unprocessed output items".into(),
+            ));
+        }
+        self.round_completed = false;
+        Ok(())
     }
 
     /// Feed one decoded Responses API SSE event into the engine.
@@ -290,7 +318,10 @@ impl ResponseMachine {
                 self.round_items.insert(output_index, item.clone());
                 Ok(vec![CoreEvent::OutputItem { output_index, item }])
             }
-            "response.completed" => Ok(Vec::new()),
+            "response.completed" => {
+                self.round_completed = true;
+                Ok(Vec::new())
+            }
             "response.incomplete" => {
                 Err(Error::Event(format!("request ended incomplete: {event}")))
             }
@@ -305,6 +336,11 @@ impl ResponseMachine {
     pub fn finish_round(&mut self) -> Result<NextAction> {
         if self.completed {
             return Err(Error::State("response is already complete".into()));
+        }
+        if !self.round_completed {
+            return Err(Error::State(
+                "request ended without a completed stream event".into(),
+            ));
         }
         let items = std::mem::take(&mut self.round_items)
             .into_values()
@@ -364,21 +400,52 @@ impl ResponseMachine {
 /// its host language, submit their outputs, and invoke this again; all request
 /// construction and state transitions remain in this core.
 pub async fn execute_round(machine: &mut ResponseMachine) -> Result<RoundResult> {
+    let mut events = Vec::new();
+    let next = execute_round_with_observer(machine, |event| events.push(event)).await?;
+    Ok(RoundResult { events, next })
+}
+
+/// Execute one provider round and emit normalized events as the SSE response
+/// arrives. Bindings may choose to buffer these events for their API boundary,
+/// but transport and core state transition processing are never buffered.
+pub async fn execute_round_with_observer<F>(
+    machine: &mut ResponseMachine,
+    mut observer: F,
+) -> Result<NextAction>
+where
+    F: FnMut(CoreEvent),
+{
     let transport = crate::OpenAiTransport::new();
-    let raw_events = match transport.stream_round(machine.wire_request()?).await {
-        Ok(events) => events,
+    machine.begin_round()?;
+    match stream_and_observe(&transport, machine, &mut observer).await {
+        Ok(()) => {}
         Err(crate::Error::HttpStatus { status: 401, .. }) if machine.is_codex() => {
             machine.replace_context(crate::refresh_codex_auth().await?);
-            transport.stream_round(machine.wire_request()?).await?
+            machine.begin_round()?;
+            stream_and_observe(&transport, machine, &mut observer).await?;
         }
         Err(error) => return Err(error),
-    };
-    let mut events = Vec::new();
-    for raw in raw_events {
-        events.extend(machine.ingest(&raw)?);
     }
-    let next = machine.finish_round()?;
-    Ok(RoundResult { events, next })
+    machine.finish_round()
+}
+
+async fn stream_and_observe<F>(
+    transport: &crate::OpenAiTransport,
+    machine: &mut ResponseMachine,
+    observer: &mut F,
+) -> Result<()>
+where
+    F: FnMut(CoreEvent),
+{
+    let wire = machine.wire_request()?;
+    transport
+        .stream_round(wire, |raw| {
+            for event in machine.ingest(&raw)? {
+                observer(event);
+            }
+            Ok(())
+        })
+        .await
 }
 
 fn openai_input_item(item: &ResponseItem) -> Value {
@@ -511,9 +578,23 @@ mod tests {
         let mut machine = ResponseMachine::new(&ProviderRegistry::default(), request()).unwrap();
         let events = machine.ingest(&json!({"type":"response.output_item.done", "output_index":0, "item":{"type":"message", "role":"assistant", "content":"Hi"}})).unwrap();
         assert!(matches!(events[0], CoreEvent::OutputItem { .. }));
+        machine
+            .ingest(&json!({"type":"response.completed"}))
+            .unwrap();
         let NextAction::Completed { result } = machine.finish_round().unwrap() else {
             panic!("expected completed")
         };
         assert_eq!(result.output_text, "Hi");
+    }
+
+    #[test]
+    fn rejects_a_round_without_a_terminal_completed_event() {
+        let mut machine = ResponseMachine::new(&ProviderRegistry::default(), request()).unwrap();
+        machine
+            .ingest(&json!({"type":"response.output_item.done", "output_index":0, "item":{"type":"message", "role":"assistant", "content":"partial"}}))
+            .unwrap();
+        assert!(
+            matches!(machine.finish_round(), Err(Error::State(message)) if message.contains("completed stream event"))
+        );
     }
 }
