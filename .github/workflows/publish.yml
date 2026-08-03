@@ -33,6 +33,7 @@ jobs:
         with:
           node-version: 24
       - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add ${{ matrix.target }}
       - run: npm ci
         working-directory: typescript
       - run: npx napi build --target ${{ matrix.target }} --platform --release --manifest-path ../crates/lmx-node/Cargo.toml --output-dir . --js native.js --dts native.d.ts --esm
