@@ -43,8 +43,11 @@ cd typescript && npm run typecheck
 ```
 
 Build the Python extension with Maturin from `python/`; build the Node addon
-with napi-rs from `typescript/`. Release packaging should publish prebuilt
-artifacts for supported Python and Node platform triples.
+with napi-rs from `typescript/`. The Node package declares macOS arm64/x64 and
+Linux glibc arm64/x64 targets. The release process builds each target, merges
+the artifacts, then runs `npm run release:artifacts` and
+`npm run release:platforms` to publish the platform packages consumed as
+optional dependencies by `@armandoraf/lmx`.
 
 ## Migration policy
 

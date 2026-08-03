@@ -14,14 +14,18 @@ fn napi_error(error: impl std::fmt::Display) -> Error {
     Error::from_reason(error.to_string())
 }
 
+fn provider_registry() -> Result<ProviderRegistry> {
+    ProviderRegistry::from_environment().map_err(napi_error)
+}
+
 #[napi]
 pub fn version() -> String {
     VERSION.into()
 }
 
 #[napi]
-pub fn provider_registry_json() -> String {
-    ProviderRegistry::default().as_json().to_string()
+pub fn provider_registry_json() -> Result<String> {
+    Ok(provider_registry()?.as_json().to_string())
 }
 
 #[napi]
@@ -57,8 +61,7 @@ pub fn tool_failure_output_json(call_id: String, error: String) -> Result<String
 #[napi]
 pub fn build_wire_request_json(request_json: String) -> Result<String> {
     let request: ResponseRequest = serde_json::from_str(&request_json).map_err(napi_error)?;
-    let machine =
-        ResponseMachine::new(&ProviderRegistry::default(), request).map_err(napi_error)?;
+    let machine = ResponseMachine::new(&provider_registry()?, request).map_err(napi_error)?;
     serde_json::to_string(&machine.wire_request().map_err(napi_error)?).map_err(napi_error)
 }
 
@@ -87,7 +90,7 @@ impl ResponseSession {
         let request: ResponseRequest = serde_json::from_str(&request_json).map_err(napi_error)?;
         Ok(Self {
             machine: Arc::new(Mutex::new(Some(
-                ResponseMachine::new(&ProviderRegistry::default(), request).map_err(napi_error)?,
+                ResponseMachine::new(&provider_registry()?, request).map_err(napi_error)?,
             ))),
             frames: Arc::new(Mutex::new(None)),
         })

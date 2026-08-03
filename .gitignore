@@ -4,6 +4,8 @@
 .venv/
 node_modules/
 typescript/dist/
+typescript/artifacts/
+typescript/npm/
 /typescript/native.js
 /typescript/*.node
 /crates/lmx-node/index.js

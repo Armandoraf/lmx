@@ -1,5 +1,7 @@
 /** Thin TypeScript adapter over the Rust-owned LMX engine. */
 
+import { z } from 'zod';
+
 import * as native from '../native.js';
 
 type Native = {
@@ -32,8 +34,75 @@ export type WireRequest = {
 
 export const version = (): string => core.version();
 
-export const providerRegistry = (): unknown[] =>
-  JSON.parse(core.providerRegistryJson()) as unknown[];
+export type ProviderName = 'codex' | 'openai' | 'nanogpt' | 'azure' | 'bedrock';
+export type ResponseItem = Record<string, unknown>;
+export type ProviderCapabilities = {
+  supportsTools: boolean;
+  supportsStructuredOutput: boolean;
+  supportsStreaming: boolean;
+  supportsImages: boolean;
+  supportsPdf: boolean;
+  supportsReasoning: boolean;
+};
+export type ProviderSpec = {
+  provider: ProviderName;
+  defaultModel: string;
+  availableModels: string[];
+  baseUrl?: string;
+  capabilities: ProviderCapabilities;
+};
+export type ToolResult =
+  | { type: 'json'; result: unknown }
+  | { type: 'content'; result: unknown; content: ResponseItem[] };
+export type ToolHandler = (arguments_: Record<string, unknown>) => ToolResult | Promise<ToolResult>;
+export type TextDeltaEvent = { type: 'text_delta'; delta: string };
+export type OutputItemEvent = { type: 'output_item'; outputIndex: number; item: ResponseItem };
+export type ToolCallStartedEvent = {
+  type: 'tool_call_started'; name: string; callId: string; arguments: Record<string, unknown>;
+};
+export type ToolCallCompletedEvent = {
+  type: 'tool_call_completed'; name: string; callId: string; result: unknown;
+};
+export type CompletedEvent = {
+  type: 'completed'; provider: ProviderName; model: string; outputItems: ResponseItem[];
+  outputText: string; toolRoundtrips: number;
+};
+export type ResponseEvent =
+  | TextDeltaEvent
+  | OutputItemEvent
+  | ToolCallStartedEvent
+  | ToolCallCompletedEvent
+  | CompletedEvent;
+export type ResponseRequest = {
+  input: ResponseItem[];
+  context?: Record<string, unknown>;
+  provider?: ProviderName;
+  model?: string;
+  instructions?: string;
+  tools?: ResponseItem[];
+  toolHandlers?: Record<string, ToolHandler>;
+  reasoningEffort?: string;
+  textVerbosity?: string;
+  maxToolRoundtrips?: number;
+};
+
+export const providerRegistry = (): ProviderSpec[] =>
+  JSON.parse(core.providerRegistryJson()) as ProviderSpec[];
+
+export const availableProviders = (): ProviderName[] =>
+  providerRegistry().map(({ provider }) => provider);
+
+export function getProvider(provider: ProviderName): ProviderSpec {
+  const spec = providerRegistry().find(candidate => candidate.provider === provider);
+  if (!spec) throw new Error(`unknown provider: ${provider}`);
+  return spec;
+}
+
+export const availableModelsForProvider = (provider: ProviderName): readonly string[] =>
+  getProvider(provider).availableModels;
+
+export const defaultModelForProvider = (provider: ProviderName): string =>
+  getProvider(provider).defaultModel;
 
 export const loadRequestContext = (provider: string): Record<string, unknown> =>
   JSON.parse(core.loadRequestContextJson(JSON.stringify(provider))) as Record<string, unknown>;
@@ -95,9 +164,6 @@ export const generateVideo = async (request: Record<string, unknown>): Promise<V
   };
 };
 
-type ToolHandler = (arguments_: Record<string, unknown>) => unknown | Promise<unknown>;
-type ResponseRequest = Record<string, unknown> & { toolHandlers?: Record<string, ToolHandler> };
-
 function normalizeToolOutput(callId: string, value: unknown): Record<string, unknown> {
   return JSON.parse(core.normalizeToolOutputJson(callId, JSON.stringify(value))) as Record<string, unknown>;
 }
@@ -106,7 +172,7 @@ function toolFailureOutput(callId: string, error: string): Record<string, unknow
   return JSON.parse(core.toolFailureOutputJson(callId, error)) as Record<string, unknown>;
 }
 
-export async function* streamResponse(request: ResponseRequest): AsyncGenerator<Record<string, unknown>> {
+export async function* streamResponse(request: ResponseRequest): AsyncGenerator<ResponseEvent> {
   const { toolHandlers = {}, ...payload } = request;
   if (!payload.context && typeof payload.provider === 'string') {
     payload.context = loadRequestContext(payload.provider);
@@ -124,7 +190,16 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
         error?: string;
       };
       if (frame.type === 'event') {
-        yield frame.event!;
+        const event = frame.event!;
+        if (event.type === 'output_item') {
+          yield {
+            type: 'output_item',
+            outputIndex: Number(event.output_index),
+            item: event.item as ResponseItem
+          };
+        } else {
+          yield event as TextDeltaEvent;
+        }
         continue;
       }
       if (frame.type === 'failed') throw new Error(frame.error);
@@ -132,7 +207,7 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
       break;
     }
     if (next.type === 'completed') {
-      yield { type: 'completed', ...(next.result as Record<string, unknown>) };
+      yield { type: 'completed', ...(next.result as Omit<CompletedEvent, 'type'>) };
       return;
     }
     const calls = next.calls as Array<{ name: string; callId: string; arguments: Record<string, unknown> }>;
@@ -155,22 +230,39 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
   }
 }
 
-export const respond = async (request: ResponseRequest): Promise<Record<string, unknown>> => {
-  let result: Record<string, unknown> | undefined;
+export type ResponseResult = {
+  provider: ProviderName;
+  model: string;
+  outputItems: ResponseItem[];
+  outputText: string;
+  toolRoundtrips: number;
+};
+
+export const respond = async (request: ResponseRequest): Promise<ResponseResult> => {
+  let result: CompletedEvent | undefined;
   for await (const event of streamResponse(request)) {
     if (event.type === 'completed') result = event;
   }
   if (!result) throw new Error('response did not complete');
   const { type: _type, ...response } = result;
-  return response;
+  return response as ResponseResult;
 };
 
 export async function structuredResponse<T>(request: ResponseRequest & {
-  textFormat: unknown;
-  schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } };
+  textFormat: z.ZodType<T>;
+  textFormatName?: string;
 }): Promise<T> {
-  const { schema, ...responseRequest } = request;
-  const result = await respond(responseRequest);
+  const { textFormat, textFormatName = 'structured_response', ...responseRequest } = request;
+  const wireRequest: ResponseRequest & { textFormat: unknown } = {
+    ...responseRequest,
+    textFormat: {
+      type: 'json_schema',
+      name: textFormatName,
+      schema: z.toJSONSchema(textFormat),
+      strict: true
+    }
+  };
+  const result = await respond(wireRequest);
   const candidates: unknown[] = [result.outputText];
   for (const item of (result.outputItems as Array<Record<string, unknown>> | undefined) ?? []) {
     const content = item.content;
@@ -186,7 +278,7 @@ export async function structuredResponse<T>(request: ResponseRequest & {
   for (const candidate of candidates.reverse()) {
     if (typeof candidate !== 'string') continue;
     try {
-      const parsed = schema.safeParse(JSON.parse(candidate) as unknown);
+      const parsed = textFormat.safeParse(JSON.parse(candidate) as unknown);
       if (parsed.success) return parsed.data;
     } catch {
       // Try the next candidate.

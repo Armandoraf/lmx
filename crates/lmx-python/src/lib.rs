@@ -13,14 +13,18 @@ fn api_error(error: impl std::fmt::Display) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(error.to_string())
 }
 
+fn provider_registry() -> PyResult<ProviderRegistry> {
+    ProviderRegistry::from_environment().map_err(api_error)
+}
+
 #[pyfunction]
 fn version() -> &'static str {
     VERSION
 }
 
 #[pyfunction]
-fn provider_registry_json() -> String {
-    ProviderRegistry::default().as_json().to_string()
+fn provider_registry_json() -> PyResult<String> {
+    Ok(provider_registry()?.as_json().to_string())
 }
 
 #[pyfunction]
@@ -58,7 +62,7 @@ fn tool_failure_output_json(call_id: &str, error: &str) -> PyResult<String> {
 #[pyfunction]
 fn build_wire_request_json(request_json: &str) -> PyResult<String> {
     let request: ResponseRequest = serde_json::from_str(request_json).map_err(api_error)?;
-    let machine = ResponseMachine::new(&ProviderRegistry::default(), request).map_err(api_error)?;
+    let machine = ResponseMachine::new(&provider_registry()?, request).map_err(api_error)?;
     serde_json::to_string(&machine.wire_request().map_err(api_error)?).map_err(api_error)
 }
 
@@ -105,7 +109,7 @@ impl ResponseSession {
         let request: ResponseRequest = serde_json::from_str(request_json).map_err(api_error)?;
         Ok(Self {
             machine: Arc::new(Mutex::new(Some(
-                ResponseMachine::new(&ProviderRegistry::default(), request).map_err(api_error)?,
+                ResponseMachine::new(&provider_registry()?, request).map_err(api_error)?,
             ))),
             frames: Mutex::new(None),
         })

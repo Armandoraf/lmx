@@ -34,9 +34,7 @@ fn codex_auth_path() -> PathBuf {
     if let Some(path) = std::env::var_os("CODEX_AUTH_PATH") {
         return PathBuf::from(path);
     }
-    let home = std::env::var_os("LMX_HOME")
-        .or_else(|| std::env::var_os("LLMX_HOME"))
-        .unwrap_or_else(|| ".lmx".into());
+    let home = std::env::var_os("LMX_HOME").unwrap_or_else(|| ".lmx".into());
     PathBuf::from(home).join("auth.json")
 }
 

@@ -1,8 +1,17 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
+import { z } from 'zod';
 
-import { generateImage, generateVideo, streamResponse } from '../dist/index.js';
+import {
+  availableModelsForProvider,
+  defaultModelForProvider,
+  generateImage,
+  generateVideo,
+  getProvider,
+  streamResponse,
+  structuredResponse
+} from '../dist/index.js';
 
 async function withServer(handler, run) {
   const server = createServer(handler);
@@ -92,5 +101,47 @@ test('the Rust media engine generates OpenAI-compatible image and video requests
     const video = await generateVideo({ context, model: 'sora-2', prompt: 'A blue square moving' });
     assert.equal(Buffer.from(image.content).toString(), 'image-bytes');
     assert.equal(Buffer.from(video.content).toString(), 'video-bytes');
+  });
+});
+
+test('the registry reads configured model catalogs in the Rust core', () => {
+  const previous = process.env.CODEX_MODELS;
+  process.env.CODEX_MODELS = 'gpt-5.6-terra,gpt-5.5';
+  try {
+    assert.equal(defaultModelForProvider('codex'), 'gpt-5.6-terra');
+    assert.deepEqual(availableModelsForProvider('codex'), ['gpt-5.6-terra', 'gpt-5.5']);
+    assert.equal(getProvider('codex').capabilities.supportsStructuredOutput, true);
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_MODELS;
+    else process.env.CODEX_MODELS = previous;
+  }
+});
+
+test('the Effigy structured-output contract sends a JSON schema from Zod', async () => {
+  const schema = z.object({ title: z.string() });
+  await withServer((request, response) => {
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      const payload = JSON.parse(body);
+      assert.deepEqual(payload.text.format.type, 'json_schema');
+      assert.equal(payload.text.format.name, 'effigy_assistant_thread_title');
+      assert.equal(payload.text.format.strict, true);
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(`data: ${JSON.stringify({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: { type: 'message', role: 'assistant', content: '{"title":"A title"}' }
+      })}\n\ndata: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
+    });
+  }, async baseUrl => {
+    const result = await structuredResponse({
+      context: { provider: 'azure', apiKey: 'test', baseUrl },
+      model: 'gpt-5.5',
+      input: [{ type: 'message', role: 'user', content: 'Name this.' }],
+      textFormat: schema,
+      textFormatName: 'effigy_assistant_thread_title'
+    });
+    assert.deepEqual(result, { title: 'A title' });
   });
 });

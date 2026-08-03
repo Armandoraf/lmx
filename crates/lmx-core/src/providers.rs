@@ -76,6 +76,84 @@ pub struct ProviderRegistry {
 
 impl Default for ProviderRegistry {
     fn default() -> Self {
+        Self::with_models(
+            vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
+            vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
+            vec![
+                "moonshotai/kimi-k2.6".into(),
+                "zai-org/glm-5.1".into(),
+                "deepseek/deepseek-v3.2".into(),
+            ],
+            vec!["gpt-5-mini".into(), "gpt-5-nano".into(), "gpt-5.5".into()],
+            vec![
+                "us.anthropic.claude-sonnet-4-6".into(),
+                "us.anthropic.claude-opus-4-7".into(),
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
+            ],
+        )
+    }
+}
+
+impl ProviderRegistry {
+    pub fn from_environment() -> Result<Self> {
+        let codex_models = models_from_environment(
+            "CODEX_MODELS",
+            vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
+        )?;
+        let openai_models = models_from_environment(
+            "OPENAI_MODELS",
+            vec![
+                std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.5".into()),
+                "gpt-5.5-mini".into(),
+            ],
+        )?;
+        let nanogpt_default =
+            std::env::var("NANOGPT_MODEL").unwrap_or_else(|_| "moonshotai/kimi-k2.6".into());
+        let nanogpt_models = models_from_environment(
+            "NANOGPT_MODELS",
+            vec![
+                nanogpt_default,
+                "moonshotai/kimi-k2.6".into(),
+                "zai-org/glm-5.1".into(),
+                "deepseek/deepseek-v3.2".into(),
+            ],
+        )?;
+        let azure_models = models_from_environment(
+            "AZURE_OPENAI_MODELS",
+            vec![
+                std::env::var("AZURE_OPENAI_MODEL").unwrap_or_else(|_| "gpt-5-mini".into()),
+                "gpt-5-mini".into(),
+                "gpt-5-nano".into(),
+                "gpt-5.5".into(),
+            ],
+        )?;
+        let bedrock_default = std::env::var("BEDROCK_MODEL")
+            .unwrap_or_else(|_| "us.anthropic.claude-sonnet-4-6".into());
+        let bedrock_models = models_from_environment(
+            "BEDROCK_MODELS",
+            vec![
+                bedrock_default,
+                "us.anthropic.claude-sonnet-4-6".into(),
+                "us.anthropic.claude-opus-4-7".into(),
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
+            ],
+        )?;
+        Ok(Self::with_models(
+            codex_models,
+            openai_models,
+            nanogpt_models,
+            azure_models,
+            bedrock_models,
+        ))
+    }
+
+    fn with_models(
+        codex_models: Vec<String>,
+        openai_models: Vec<String>,
+        nanogpt_models: Vec<String>,
+        azure_models: Vec<String>,
+        bedrock_models: Vec<String>,
+    ) -> Self {
         let capabilities = ProviderCapabilities {
             supports_tools: true,
             supports_structured_output: true,
@@ -89,8 +167,8 @@ impl Default for ProviderRegistry {
             Provider::Codex,
             ProviderSpec {
                 provider: Provider::Codex,
-                default_model: "gpt-5.5".into(),
-                available_models: vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
+                default_model: codex_models[0].clone(),
+                available_models: codex_models,
                 base_url: Some("https://chatgpt.com/backend-api/codex".into()),
                 capabilities: capabilities.clone(),
             },
@@ -99,8 +177,8 @@ impl Default for ProviderRegistry {
             Provider::Openai,
             ProviderSpec {
                 provider: Provider::Openai,
-                default_model: "gpt-5.5".into(),
-                available_models: vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
+                default_model: openai_models[0].clone(),
+                available_models: openai_models,
                 base_url: Some("https://api.openai.com/v1".into()),
                 capabilities: capabilities.clone(),
             },
@@ -109,12 +187,8 @@ impl Default for ProviderRegistry {
             Provider::Nanogpt,
             ProviderSpec {
                 provider: Provider::Nanogpt,
-                default_model: "moonshotai/kimi-k2.6".into(),
-                available_models: vec![
-                    "moonshotai/kimi-k2.6".into(),
-                    "zai-org/glm-5.1".into(),
-                    "deepseek/deepseek-v3.2".into(),
-                ],
+                default_model: nanogpt_models[0].clone(),
+                available_models: nanogpt_models,
                 base_url: Some("https://nano-gpt.com/api/v1".into()),
                 capabilities: capabilities.clone(),
             },
@@ -123,8 +197,8 @@ impl Default for ProviderRegistry {
             Provider::Azure,
             ProviderSpec {
                 provider: Provider::Azure,
-                default_model: "gpt-5-mini".into(),
-                available_models: vec!["gpt-5-mini".into(), "gpt-5-nano".into(), "gpt-5.5".into()],
+                default_model: azure_models[0].clone(),
+                available_models: azure_models,
                 base_url: None,
                 capabilities,
             },
@@ -133,12 +207,8 @@ impl Default for ProviderRegistry {
             Provider::Bedrock,
             ProviderSpec {
                 provider: Provider::Bedrock,
-                default_model: "us.anthropic.claude-sonnet-4-6".into(),
-                available_models: vec![
-                    "us.anthropic.claude-sonnet-4-6".into(),
-                    "us.anthropic.claude-opus-4-7".into(),
-                    "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
-                ],
+                default_model: bedrock_models[0].clone(),
+                available_models: bedrock_models,
                 base_url: None,
                 capabilities: ProviderCapabilities {
                     supports_tools: true,
@@ -152,9 +222,6 @@ impl Default for ProviderRegistry {
         );
         Self { specs }
     }
-}
-
-impl ProviderRegistry {
     pub fn get(&self, provider: &Provider) -> Result<&ProviderSpec> {
         self.specs
             .get(provider)
@@ -169,4 +236,29 @@ impl ProviderRegistry {
         serde_json::to_value(self.specs().collect::<Vec<_>>())
             .expect("ProviderSpec is serializable")
     }
+}
+
+fn models_from_environment(name: &str, fallback: Vec<String>) -> Result<Vec<String>> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(deduplicate_models(fallback)),
+        Err(error) => return Err(Error::State(format!("could not read {name}: {error}"))),
+    };
+    let models = deduplicate_models(raw.split(',').map(str::trim).map(str::to_owned).collect());
+    if models.is_empty() {
+        return Err(Error::State(format!(
+            "{name} must contain at least one model slug"
+        )));
+    }
+    Ok(models)
+}
+
+fn deduplicate_models(models: Vec<String>) -> Vec<String> {
+    let mut unique = Vec::new();
+    for model in models {
+        if !model.is_empty() && !unique.contains(&model) {
+            unique.push(model);
+        }
+    }
+    unique
 }
