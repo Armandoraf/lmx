@@ -17,12 +17,16 @@ jobs:
         include:
           - os: macos-14
             package: darwin-arm64
-          - os: macos-13
+            target: aarch64-apple-darwin
+          - os: macos-14
             package: darwin-x64
+            target: x86_64-apple-darwin
           - os: ubuntu-24.04
             package: linux-x64-gnu
+            target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             package: linux-arm64-gnu
+            target: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,7 +35,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
         working-directory: typescript
-      - run: npm run build:native
+      - run: npx napi build --target ${{ matrix.target }} --platform --release --manifest-path ../crates/lmx-node/Cargo.toml --output-dir . --js native.js --dts native.d.ts --esm
         working-directory: typescript
       - uses: actions/upload-artifact@v4
         with:
