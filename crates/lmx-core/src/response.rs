@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::{Error, ProviderRegistry, RequestContext, Result, endpoint_url};
 
@@ -389,8 +390,18 @@ impl ResponseMachine {
 /// its host language, submit their outputs, and invoke this again; all request
 /// construction and state transitions remain in this core.
 pub async fn execute_round(machine: &mut ResponseMachine) -> Result<RoundResult> {
+    let cancellation = CancellationToken::new();
+    execute_round_with_cancellation(machine, &cancellation).await
+}
+
+/// Execute one provider round with cooperative cancellation.
+pub async fn execute_round_with_cancellation(
+    machine: &mut ResponseMachine,
+    cancellation: &CancellationToken,
+) -> Result<RoundResult> {
     let mut events = Vec::new();
-    let next = execute_round_with_observer(machine, |event| events.push(event)).await?;
+    let next =
+        execute_round_with_observer(machine, cancellation, |event| events.push(event)).await?;
     Ok(RoundResult { events, next })
 }
 
@@ -399,6 +410,7 @@ pub async fn execute_round(machine: &mut ResponseMachine) -> Result<RoundResult>
 /// but transport and core state transition processing are never buffered.
 pub async fn execute_round_with_observer<F>(
     machine: &mut ResponseMachine,
+    cancellation: &CancellationToken,
     mut observer: F,
 ) -> Result<NextAction>
 where
@@ -406,12 +418,19 @@ where
 {
     let transport = crate::OpenAiTransport::new();
     machine.begin_round()?;
-    match stream_and_observe(&transport, machine, &mut observer).await {
+    match stream_and_observe(&transport, machine, cancellation, &mut observer).await {
         Ok(()) => {}
         Err(crate::Error::HttpStatus { status: 401, .. }) if machine.is_codex() => {
-            machine.replace_context(crate::refresh_codex_auth().await?);
+            if cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let refreshed = tokio::select! {
+                _ = cancellation.cancelled() => return Err(Error::Cancelled),
+                refreshed = crate::refresh_codex_auth() => refreshed?,
+            };
+            machine.replace_context(refreshed);
             machine.begin_round()?;
-            stream_and_observe(&transport, machine, &mut observer).await?;
+            stream_and_observe(&transport, machine, cancellation, &mut observer).await?;
         }
         Err(error) => return Err(error),
     }
@@ -421,6 +440,7 @@ where
 async fn stream_and_observe<F>(
     transport: &crate::OpenAiTransport,
     machine: &mut ResponseMachine,
+    cancellation: &CancellationToken,
     observer: &mut F,
 ) -> Result<()>
 where
@@ -428,7 +448,7 @@ where
 {
     let wire = machine.wire_request()?;
     transport
-        .stream_round(wire, |raw| {
+        .stream_round(wire, cancellation, |raw| {
             for event in machine.ingest(&raw)? {
                 observer(event);
             }

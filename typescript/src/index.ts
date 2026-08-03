@@ -18,6 +18,7 @@ type Native = {
   ResponseSession: new (request: string) => {
     executeRoundJson(): Promise<string>;
     submitToolOutputsJson(outputs: string): string;
+    cancel(): void;
     startRound(): void;
     nextFrameJson(): Promise<string>;
   };
@@ -88,6 +89,7 @@ export type ResponseRequest = {
   toolHandlers?: Record<string, ToolHandler>;
   reasoningEffort?: string;
   textVerbosity?: string;
+  signal?: AbortSignal;
 };
 
 export const providerRegistry = (): ProviderSpec[] =>
@@ -188,61 +190,95 @@ function toolFailureOutput(callId: string, error: string): Record<string, unknow
   return JSON.parse(core.toolFailureOutputJson(callId, error)) as Record<string, unknown>;
 }
 
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Response cancelled', 'AbortError');
+}
+
+async function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw abortError(signal);
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 export async function* streamResponse(request: ResponseRequest): AsyncGenerator<ResponseEvent> {
-  const { toolHandlers = {}, ...payload } = request;
+  const { toolHandlers = {}, signal, ...payload } = request;
   if (!payload.context && typeof payload.provider === 'string') {
     payload.context = loadRequestContext(payload.provider);
     delete payload.provider;
   }
   const session = new core.ResponseSession(JSON.stringify(payload));
-  while (true) {
-    session.startRound();
-    let next: Record<string, unknown>;
+  const cancel = () => session.cancel();
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener('abort', cancel, { once: true });
+
+  try {
     while (true) {
-      const frame = JSON.parse(await session.nextFrameJson()) as {
-        type: string;
-        event?: Record<string, unknown>;
-        next?: Record<string, unknown>;
-        error?: string;
-      };
-      if (frame.type === 'event') {
-        const event = frame.event!;
-        if (event.type === 'output_item') {
-          yield {
-            type: 'output_item',
-            outputIndex: Number(event.output_index),
-            item: event.item as ResponseItem
-          };
-        } else {
-          yield event as TextDeltaEvent;
+      if (signal?.aborted) throw abortError(signal);
+      session.startRound();
+      let next: Record<string, unknown>;
+      while (true) {
+        const frame = JSON.parse(await session.nextFrameJson()) as {
+          type: string;
+          event?: Record<string, unknown>;
+          next?: Record<string, unknown>;
+          error?: string;
+        };
+        if (frame.type === 'event') {
+          const event = frame.event!;
+          if (event.type === 'output_item') {
+            yield {
+              type: 'output_item',
+              outputIndex: Number(event.output_index),
+              item: event.item as ResponseItem
+            };
+          } else {
+            yield event as TextDeltaEvent;
+          }
+          continue;
         }
-        continue;
+        if (frame.type === 'failed') {
+          if (signal?.aborted) throw abortError(signal);
+          throw new Error(frame.error);
+        }
+        next = frame.next!;
+        break;
       }
-      if (frame.type === 'failed') throw new Error(frame.error);
-      next = frame.next!;
-      break;
-    }
-    if (next.type === 'completed') {
-      yield { type: 'completed', ...(next.result as Omit<CompletedEvent, 'type'>) };
-      return;
-    }
-    const calls = next.calls as Array<{ name: string; callId: string; arguments: Record<string, unknown> }>;
-    const outputs: Array<Record<string, unknown>> = [];
-    for (const call of calls) {
-      yield { type: 'tool_call_started', ...call };
-      let output: Record<string, unknown>;
-      try {
-        const value = toolHandlers[call.name]
-          ? await toolHandlers[call.name](call.arguments)
-          : { ok: false, error: `unknown function tool: ${call.name}` };
-        output = normalizeToolOutput(call.callId, value);
-      } catch (error) {
-        output = toolFailureOutput(call.callId, error instanceof Error ? error.message : String(error));
+      if (next.type === 'completed') {
+        yield { type: 'completed', ...(next.result as Omit<CompletedEvent, 'type'>) };
+        return;
       }
-      outputs.push(output);
-      yield { type: 'tool_call_completed', name: call.name, callId: call.callId, result: output.result };
+      const calls = next.calls as Array<{ name: string; callId: string; arguments: Record<string, unknown> }>;
+      const outputs: Array<Record<string, unknown>> = [];
+      for (const call of calls) {
+        yield { type: 'tool_call_started', ...call };
+        let output: Record<string, unknown>;
+        try {
+          if (signal?.aborted) throw abortError(signal);
+          const value = toolHandlers[call.name]
+            ? await awaitWithSignal(Promise.resolve(toolHandlers[call.name](call.arguments)), signal)
+            : { ok: false, error: `unknown function tool: ${call.name}` };
+          if (signal?.aborted) throw abortError(signal);
+          output = normalizeToolOutput(call.callId, value);
+        } catch (error) {
+          if (signal?.aborted) throw abortError(signal);
+          output = toolFailureOutput(call.callId, error instanceof Error ? error.message : String(error));
+        }
+        outputs.push(output);
+        yield { type: 'tool_call_completed', name: call.name, callId: call.callId, result: output.result };
+      }
+      if (signal?.aborted) throw abortError(signal);
+      session.submitToolOutputsJson(JSON.stringify(outputs));
     }
-    session.submitToolOutputsJson(JSON.stringify(outputs));
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    session.cancel();
   }
 }
 

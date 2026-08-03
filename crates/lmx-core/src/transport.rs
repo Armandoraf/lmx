@@ -1,6 +1,7 @@
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::{Error, Result, WireRequest};
 
@@ -39,7 +40,12 @@ impl OpenAiTransport {
     /// Keeping the decoded events as JSON makes the boundary stable for all
     /// provider-specific event shapes while normalization remains in
     /// `ResponseMachine`.
-    pub async fn stream_round<F>(&self, wire: WireRequest, mut on_event: F) -> Result<()>
+    pub async fn stream_round<F>(
+        &self,
+        wire: WireRequest,
+        cancellation: &CancellationToken,
+        mut on_event: F,
+    ) -> Result<()>
     where
         F: FnMut(Value) -> Result<()>,
     {
@@ -47,7 +53,10 @@ impl OpenAiTransport {
         for (name, value) in &wire.headers {
             request = request.header(name, value);
         }
-        let response = request.send().await?;
+        let response = tokio::select! {
+            _ = cancellation.cancelled() => return Err(Error::Cancelled),
+            response = request.send() => response?,
+        };
         let status = response.status();
         if !status.is_success() {
             return Err(Error::HttpStatus {
@@ -57,7 +66,10 @@ impl OpenAiTransport {
         }
 
         let mut source = response.bytes_stream().eventsource();
-        while let Some(next) = source.next().await {
+        while let Some(next) = tokio::select! {
+            _ = cancellation.cancelled() => return Err(Error::Cancelled),
+            next = source.next() => next,
+        } {
             let event = next.map_err(|error| Error::Transport(error.to_string()))?;
             if event.data == "[DONE]" || event.data.trim().is_empty() {
                 continue;

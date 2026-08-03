@@ -1,8 +1,8 @@
 use lmx_core::{
-    ImageRequest, ProviderRegistry, ResponseFrame, ResponseMachine, ResponseRequest, ToolOutput,
-    VERSION, VideoRequest, build_message_item, execute_round, execute_round_with_observer,
-    generate_image, generate_video, load_request_context, normalize_tool_output,
-    output_text_from_items, tool_failure_output,
+    CancellationToken, ImageRequest, ProviderRegistry, ResponseFrame, ResponseMachine,
+    ResponseRequest, ToolOutput, VERSION, VideoRequest, build_message_item,
+    execute_round_with_cancellation, execute_round_with_observer, generate_image, generate_video,
+    load_request_context, normalize_tool_output, output_text_from_items, tool_failure_output,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -79,6 +79,7 @@ pub async fn generate_video_json(request_json: String) -> Result<String> {
 
 #[napi]
 pub struct ResponseSession {
+    cancellation: CancellationToken,
     machine: Arc<Mutex<Option<ResponseMachine>>>,
     frames: Arc<Mutex<Option<FrameReceiver>>>,
 }
@@ -89,6 +90,7 @@ impl ResponseSession {
     pub fn new(request_json: String) -> Result<Self> {
         let request: ResponseRequest = serde_json::from_str(&request_json).map_err(napi_error)?;
         Ok(Self {
+            cancellation: CancellationToken::new(),
             machine: Arc::new(Mutex::new(Some(
                 ResponseMachine::new(&provider_registry()?, request).map_err(napi_error)?,
             ))),
@@ -104,7 +106,7 @@ impl ResponseSession {
             .map_err(napi_error)?
             .take()
             .ok_or_else(|| Error::from_reason("response session is already executing"))?;
-        let outcome = execute_round(&mut machine).await;
+        let outcome = execute_round_with_cancellation(&mut machine, &self.cancellation).await;
         *self.machine.lock().map_err(napi_error)? = Some(machine);
         serde_json::to_string(&outcome.map_err(napi_error)?).map_err(napi_error)
     }
@@ -118,6 +120,11 @@ impl ResponseSession {
             .ok_or_else(|| Error::from_reason("response session is already executing"))?;
         serde_json::to_string(&machine.submit_tool_outputs(outputs).map_err(napi_error)?)
             .map_err(napi_error)
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
     }
 
     #[napi]
@@ -137,6 +144,7 @@ impl ResponseSession {
         let (sender, receiver) = mpsc::channel();
         *frames = Some(Arc::new(Mutex::new(receiver)));
         let machine_slot = Arc::clone(&self.machine);
+        let cancellation = self.cancellation.clone();
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -154,9 +162,13 @@ impl ResponseSession {
                 }
             };
             let mut machine = machine;
-            let result = runtime.block_on(execute_round_with_observer(&mut machine, |event| {
-                let _ = sender.send(ResponseFrame::Event { event });
-            }));
+            let result = runtime.block_on(execute_round_with_observer(
+                &mut machine,
+                &cancellation,
+                |event| {
+                    let _ = sender.send(ResponseFrame::Event { event });
+                },
+            ));
             if let Ok(mut slot) = machine_slot.lock() {
                 *slot = Some(machine);
             }
@@ -196,5 +208,11 @@ impl ResponseSession {
             *self.frames.lock().map_err(napi_error)? = Some(receiver);
         }
         serde_json::to_string(&frame).map_err(napi_error)
+    }
+}
+
+impl Drop for ResponseSession {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }

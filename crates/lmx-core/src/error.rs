@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("response cancelled")]
+    Cancelled,
     #[error("unknown provider: {0}")]
     UnknownProvider(String),
     #[error("provider {0} has no OpenAI-compatible base URL")]

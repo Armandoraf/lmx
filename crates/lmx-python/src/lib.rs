@@ -1,8 +1,8 @@
 use lmx_core::{
-    ImageRequest, ProviderRegistry, ResponseFrame, ResponseMachine, ResponseRequest, ToolOutput,
-    VERSION, VideoRequest, build_message_item, execute_round, execute_round_with_observer,
-    generate_image, generate_video, load_request_context, normalize_tool_output,
-    output_text_from_items, tool_failure_output,
+    CancellationToken, ImageRequest, ProviderRegistry, ResponseFrame, ResponseMachine,
+    ResponseRequest, ToolOutput, VERSION, VideoRequest, build_message_item,
+    execute_round_with_cancellation, execute_round_with_observer, generate_image, generate_video,
+    load_request_context, normalize_tool_output, output_text_from_items, tool_failure_output,
 };
 use pyo3::prelude::*;
 use std::sync::{Arc, Mutex, mpsc};
@@ -98,6 +98,7 @@ fn generate_video_json(request_json: &str) -> PyResult<String> {
 
 #[pyclass]
 struct ResponseSession {
+    cancellation: CancellationToken,
     machine: Arc<Mutex<Option<ResponseMachine>>>,
     frames: Mutex<Option<FrameReceiver>>,
 }
@@ -108,6 +109,7 @@ impl ResponseSession {
     fn new(request_json: &str) -> PyResult<Self> {
         let request: ResponseRequest = serde_json::from_str(request_json).map_err(api_error)?;
         Ok(Self {
+            cancellation: CancellationToken::new(),
             machine: Arc::new(Mutex::new(Some(
                 ResponseMachine::new(&provider_registry()?, request).map_err(api_error)?,
             ))),
@@ -126,7 +128,7 @@ impl ResponseSession {
             .ok_or_else(|| api_error("response session is already executing"))?;
         serde_json::to_string(
             &runtime
-                .block_on(execute_round(machine))
+                .block_on(execute_round_with_cancellation(machine, &self.cancellation))
                 .map_err(api_error)?,
         )
         .map_err(api_error)
@@ -140,6 +142,10 @@ impl ResponseSession {
             .ok_or_else(|| api_error("response session is already executing"))?;
         serde_json::to_string(&machine.submit_tool_outputs(outputs).map_err(api_error)?)
             .map_err(api_error)
+    }
+
+    fn cancel(&self) {
+        self.cancellation.cancel();
     }
 
     fn start_round(&self) -> PyResult<()> {
@@ -156,6 +162,7 @@ impl ResponseSession {
         let (sender, receiver) = mpsc::channel();
         *frames = Some(Arc::new(Mutex::new(receiver)));
         let machine_slot = Arc::clone(&self.machine);
+        let cancellation = self.cancellation.clone();
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -173,9 +180,13 @@ impl ResponseSession {
                 }
             };
             let mut machine = machine;
-            let result = runtime.block_on(execute_round_with_observer(&mut machine, |event| {
-                let _ = sender.send(ResponseFrame::Event { event });
-            }));
+            let result = runtime.block_on(execute_round_with_observer(
+                &mut machine,
+                &cancellation,
+                |event| {
+                    let _ = sender.send(ResponseFrame::Event { event });
+                },
+            ));
             if let Ok(mut slot) = machine_slot.lock() {
                 *slot = Some(machine);
             }
@@ -213,6 +224,12 @@ impl ResponseSession {
             *self.frames.lock().map_err(api_error)? = Some(receiver);
         }
         serde_json::to_string(&frame).map_err(api_error)
+    }
+}
+
+impl Drop for ResponseSession {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }
 

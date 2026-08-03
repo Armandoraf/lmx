@@ -95,33 +95,36 @@ def stream_response(request: dict[str, Any]):
     if "context" not in payload and "provider" in payload:
         payload["context"] = load_request_context(str(payload.pop("provider")))
     session = ResponseSession(json.dumps(payload))
-    while True:
-        session.start_round()
+    try:
         while True:
-            frame = json.loads(session.next_frame_json())
-            if frame["type"] == "event":
-                yield frame["event"]
-                continue
-            if frame["type"] == "failed":
-                raise RuntimeError(frame["error"])
-            action = frame["next"]
-            break
-        if action["type"] == "completed":
-            result = action["result"]
-            yield {"type": "completed", **result}
-            return result
-        outputs = []
-        for call in action["calls"]:
-            yield {"type": "tool_call_started", **call}
-            handler = handlers.get(call["name"])
-            if handler is None:
-                output = json.loads(tool_failure_output_json(call["callId"], f"unknown function tool: {call['name']}"))
-                observed = output["result"]
-            else:
-                output, observed = _tool_output(call, handler)
-            outputs.append(output)
-            yield {"type": "tool_call_completed", "name": call["name"], "callId": call["callId"], "result": observed}
-        session.submit_tool_outputs_json(json.dumps(outputs))
+            session.start_round()
+            while True:
+                frame = json.loads(session.next_frame_json())
+                if frame["type"] == "event":
+                    yield frame["event"]
+                    continue
+                if frame["type"] == "failed":
+                    raise RuntimeError(frame["error"])
+                action = frame["next"]
+                break
+            if action["type"] == "completed":
+                result = action["result"]
+                yield {"type": "completed", **result}
+                return result
+            outputs = []
+            for call in action["calls"]:
+                yield {"type": "tool_call_started", **call}
+                handler = handlers.get(call["name"])
+                if handler is None:
+                    output = json.loads(tool_failure_output_json(call["callId"], f"unknown function tool: {call['name']}"))
+                    observed = output["result"]
+                else:
+                    output, observed = _tool_output(call, handler)
+                outputs.append(output)
+                yield {"type": "tool_call_completed", "name": call["name"], "callId": call["callId"], "result": observed}
+            session.submit_tool_outputs_json(json.dumps(outputs))
+    finally:
+        session.cancel()
 
 
 def respond(request: dict[str, Any]) -> dict[str, Any]:

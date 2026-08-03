@@ -22,9 +22,10 @@ pub use providers::{Provider, ProviderRegistry, ProviderSpec, RequestContext};
 pub use response::{
     CoreEvent, NextAction, ResponseFrame, ResponseMachine, ResponseRequest, ResponseResult,
     RoundResult, ToolCall, ToolOutput, WireRequest, build_message_item, execute_round,
-    execute_round_with_observer, normalize_tool_output, output_text_from_items,
-    tool_failure_output,
+    execute_round_with_cancellation, execute_round_with_observer, normalize_tool_output,
+    output_text_from_items, tool_failure_output,
 };
+pub use tokio_util::sync::CancellationToken;
 pub use transport::OpenAiTransport;
 pub use video::{VideoJob, VideoRequest, VideoResult, generate_video};
 

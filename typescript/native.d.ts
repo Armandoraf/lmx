@@ -4,6 +4,7 @@ export declare class ResponseSession {
   constructor(requestJson: string)
   executeRoundJson(): Promise<string>
   submitToolOutputsJson(outputsJson: string): string
+  cancel(): void
   startRound(): void
   nextFrameJson(): Promise<string>
 }

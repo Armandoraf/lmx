@@ -79,6 +79,69 @@ test('streamResponse yields a text delta before the SSE stream completes', async
   });
 });
 
+test('streamResponse abort closes an active provider stream', async () => {
+  let waitForDisconnect;
+  await withServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'Hello' })}\n\n`);
+    waitForDisconnect = new Promise(resolve => {
+      const timer = setTimeout(() => resolve(false), 1_000);
+      response.on('close', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  }, async baseUrl => {
+    const controller = new AbortController();
+    const stream = streamResponse({
+      context: { provider: 'azure', apiKey: 'test', baseUrl },
+      model: 'gpt-5.5',
+      input: [{ type: 'message', role: 'user', content: 'Hello' }],
+      signal: controller.signal
+    });
+    assert.deepEqual((await stream.next()).value, { type: 'text_delta', delta: 'Hello' });
+    controller.abort();
+    await assert.rejects(stream.next(), error => error?.name === 'AbortError');
+  });
+  assert.equal(await waitForDisconnect, true);
+});
+
+test('streamResponse abort does not invoke a pending tool or start another round', async () => {
+  let requests = 0;
+  let invoked = false;
+  await withServer((request, response) => {
+    requests += 1;
+    request.resume();
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify({
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'call_wait', name: 'wait', arguments: '{}' }
+    })}\n\ndata: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
+  }, async baseUrl => {
+    const controller = new AbortController();
+    const stream = streamResponse({
+      context: { provider: 'azure', apiKey: 'test', baseUrl },
+      model: 'gpt-5.5',
+      input: [{ type: 'message', role: 'user', content: 'Wait.' }],
+      signal: controller.signal,
+      tools: [{ type: 'function', name: 'wait' }],
+      toolHandlers: {
+        wait: () => {
+          invoked = true;
+          return { type: 'json', result: { ok: true } };
+        }
+      }
+    });
+    await stream.next(); // output_item
+    assert.equal((await stream.next()).value.type, 'tool_call_started');
+    controller.abort();
+    await assert.rejects(stream.next(), error => error?.name === 'AbortError');
+  });
+  assert.equal(invoked, false);
+  assert.equal(requests, 1);
+});
+
 test('the Rust media engine generates OpenAI-compatible image and video requests', async () => {
   let editBody = '';
   await withServer((request, response) => {
