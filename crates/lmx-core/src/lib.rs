@@ -16,7 +16,10 @@ mod video;
 pub use auth::{load_request_context, normalize_azure_endpoint, refresh_codex_auth};
 pub use endpoint::endpoint_url;
 pub use error::{Error, Result};
-pub use images::{ImageJob, ImageRequest, ImageResult, generate_image};
+pub use images::{
+    ImageJob, ImageRequest, ImageResult, ImageStreamEvent, ImageStreamRequest, generate_image,
+    stream_image,
+};
 pub use keying::{WHITE_KEY_HEX, prompt_for_white_key, remove_white_key_background};
 pub use providers::{Provider, ProviderRegistry, ProviderSpec, RequestContext};
 pub use response::{

@@ -14,6 +14,10 @@ type Native = {
   toolFailureOutputJson(callId: string, error: string): string;
   buildWireRequestJson(request: string): string;
   generateImageJson(request: string): Promise<string>;
+  ImageStream: new (request: string) => {
+    nextEventJson(): Promise<string | null>;
+    cancel(): void;
+  };
   generateVideoJson(request: string): Promise<string>;
   ResponseSession: new (request: string) => {
     executeRoundJson(): Promise<string>;
@@ -26,7 +30,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.1.8';
+const packageVersion = '0.1.9';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -148,6 +152,10 @@ export type ImageResult = {
   contentType: string;
 };
 
+export type ImagePartialEvent = { type: 'partial'; index: number; result: ImageResult };
+export type ImageCompletedEvent = { type: 'completed'; result: ImageResult; usage?: Record<string, unknown> };
+export type ImageStreamEvent = ImagePartialEvent | ImageCompletedEvent;
+
 export const generateImage = async (request: Record<string, unknown>): Promise<ImageResult> => {
   const payload = { ...request };
   if (!payload.context && typeof payload.provider === 'string') {
@@ -165,6 +173,49 @@ export const generateImage = async (request: Record<string, unknown>): Promise<I
     contentType: result.contentType
   };
 };
+
+/** Stream progressive previews and the final image from the Image API. */
+export async function* streamImage(
+  request: Record<string, unknown> & { signal?: AbortSignal },
+): AsyncGenerator<ImageStreamEvent> {
+  const { signal, ...requestPayload } = request;
+  const payload = { ...requestPayload };
+  if (!payload.context && typeof payload.provider === 'string') {
+    payload.context = loadRequestContext(payload.provider);
+    delete payload.provider;
+  }
+  const stream = new core.ImageStream(JSON.stringify(payload));
+  const cancel = () => stream.cancel();
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    while (true) {
+      if (signal?.aborted) throw abortError(signal);
+      const encoded = await awaitWithSignal(stream.nextEventJson(), signal);
+      if (encoded === null) return;
+      const event = JSON.parse(encoded) as {
+        type: 'partial' | 'completed';
+        index?: number;
+        result: { job: ImageJob; contentBase64: string; contentType: string };
+        usage?: Record<string, unknown>;
+      };
+      const result: ImageResult = {
+        job: event.result.job,
+        content: Uint8Array.from(Buffer.from(event.result.contentBase64, 'base64')),
+        contentType: event.result.contentType,
+      };
+      if (event.type === 'partial') {
+        yield { type: 'partial', index: event.index!, result };
+      } else {
+        yield { type: 'completed', result, usage: event.usage };
+        return;
+      }
+    }
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    stream.cancel();
+  }
+}
 
 export type VideoResult = {
   job: Record<string, unknown>;

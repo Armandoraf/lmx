@@ -35,6 +35,22 @@ the same `ResponseMachine`. The core decides whether to start the next provider
 round or complete the response. This keeps callback execution language-native
 without duplicating orchestration.
 
+## Streaming images
+
+`streamImage` (TypeScript) and `stream_image` (Python) yield normalized
+`partial` preview events followed by a `completed` event. They use
+`/images/generations` when no input images are supplied and `/images/edits` when
+input images are present. `partialImages` defaults to `2` and
+accepts `0` through `3`.
+
+```ts
+for await (const event of streamImage({
+  provider: 'openai', model: 'gpt-image-2', prompt: 'A blue square', partialImages: 2
+})) {
+  // event.result.content is a Uint8Array
+}
+```
+
 ## Development
 
 ```sh

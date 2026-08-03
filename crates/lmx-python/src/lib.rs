@@ -1,8 +1,9 @@
 use lmx_core::{
-    CancellationToken, ImageRequest, ProviderRegistry, ResponseFrame, ResponseMachine,
-    ResponseRequest, ToolOutput, VERSION, VideoRequest, build_message_item,
-    execute_round_with_cancellation, execute_round_with_observer, generate_image, generate_video,
-    load_request_context, normalize_tool_output, output_text_from_items, tool_failure_output,
+    CancellationToken, ImageRequest, ImageStreamEvent, ImageStreamRequest, ProviderRegistry,
+    ResponseFrame, ResponseMachine, ResponseRequest, ToolOutput, VERSION, VideoRequest,
+    build_message_item, execute_round_with_cancellation, execute_round_with_observer,
+    generate_image, generate_video, load_request_context, normalize_tool_output,
+    output_text_from_items, stream_image, tool_failure_output,
 };
 use pyo3::prelude::*;
 use std::sync::{Arc, Mutex, mpsc};
@@ -79,6 +80,76 @@ fn generate_image_json(request_json: &str) -> PyResult<String> {
             .map_err(api_error)?,
     )
     .map_err(api_error)
+}
+
+#[pyclass]
+struct ImageStream {
+    cancellation: CancellationToken,
+    events: Arc<
+        Mutex<Option<Arc<Mutex<mpsc::Receiver<std::result::Result<ImageStreamEvent, String>>>>>>,
+    >,
+}
+
+#[pymethods]
+impl ImageStream {
+    #[new]
+    fn new(request_json: &str) -> PyResult<Self> {
+        let request: ImageStreamRequest = serde_json::from_str(request_json).map_err(api_error)?;
+        let cancellation = CancellationToken::new();
+        let (sender, receiver) = mpsc::channel();
+        let worker_cancellation = cancellation.clone();
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = sender.send(Err(error.to_string()));
+                    return;
+                }
+            };
+            let result = runtime.block_on(stream_image(request, &worker_cancellation, |event| {
+                sender
+                    .send(Ok(event))
+                    .map_err(|error| lmx_core::Error::Event(error.to_string()))
+            }));
+            if let Err(error) = result {
+                let _ = sender.send(Err(error.to_string()));
+            }
+        });
+        Ok(Self {
+            cancellation,
+            events: Arc::new(Mutex::new(Some(Arc::new(Mutex::new(receiver))))),
+        })
+    }
+
+    fn next_event_json(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        let receiver = self.events.lock().map_err(api_error)?.take();
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        let worker = Arc::clone(&receiver);
+        let item = py.detach(move || worker.lock().ok().and_then(|receiver| receiver.recv().ok()));
+        match item {
+            Some(Ok(event)) => {
+                *self.events.lock().map_err(api_error)? = Some(receiver);
+                serde_json::to_string(&event).map(Some).map_err(api_error)
+            }
+            Some(Err(error)) => Err(api_error(error)),
+            None => Ok(None),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+}
+
+impl Drop for ImageStream {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 
 #[pyfunction]
@@ -246,5 +317,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(generate_image_json, module)?)?;
     module.add_function(wrap_pyfunction!(generate_video_json, module)?)?;
     module.add_class::<ResponseSession>()?;
+    module.add_class::<ImageStream>()?;
     Ok(())
 }

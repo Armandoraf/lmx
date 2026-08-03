@@ -1,8 +1,9 @@
 use lmx_core::{
-    CancellationToken, ImageRequest, ProviderRegistry, ResponseFrame, ResponseMachine,
-    ResponseRequest, ToolOutput, VERSION, VideoRequest, build_message_item,
-    execute_round_with_cancellation, execute_round_with_observer, generate_image, generate_video,
-    load_request_context, normalize_tool_output, output_text_from_items, tool_failure_output,
+    CancellationToken, ImageRequest, ImageStreamEvent, ImageStreamRequest, ProviderRegistry,
+    ResponseFrame, ResponseMachine, ResponseRequest, ToolOutput, VERSION, VideoRequest,
+    build_message_item, execute_round_with_cancellation, execute_round_with_observer,
+    generate_image, generate_video, load_request_context, normalize_tool_output,
+    output_text_from_items, stream_image, tool_failure_output,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -69,6 +70,83 @@ pub fn build_wire_request_json(request_json: String) -> Result<String> {
 pub async fn generate_image_json(request_json: String) -> Result<String> {
     let request: ImageRequest = serde_json::from_str(&request_json).map_err(napi_error)?;
     serde_json::to_string(&generate_image(request).await.map_err(napi_error)?).map_err(napi_error)
+}
+
+#[napi]
+pub struct ImageStream {
+    cancellation: CancellationToken,
+    events: Arc<
+        Mutex<Option<Arc<Mutex<mpsc::Receiver<std::result::Result<ImageStreamEvent, String>>>>>>,
+    >,
+}
+
+#[napi]
+impl ImageStream {
+    #[napi(constructor)]
+    pub fn new(request_json: String) -> Result<Self> {
+        let request: ImageStreamRequest =
+            serde_json::from_str(&request_json).map_err(napi_error)?;
+        let cancellation = CancellationToken::new();
+        let (sender, receiver) = mpsc::channel();
+        let worker_cancellation = cancellation.clone();
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = sender.send(Err(error.to_string()));
+                    return;
+                }
+            };
+            let result = runtime.block_on(stream_image(request, &worker_cancellation, |event| {
+                sender
+                    .send(Ok(event))
+                    .map_err(|error| lmx_core::Error::Event(error.to_string()))
+            }));
+            if let Err(error) = result {
+                let _ = sender.send(Err(error.to_string()));
+            }
+        });
+        Ok(Self {
+            cancellation,
+            events: Arc::new(Mutex::new(Some(Arc::new(Mutex::new(receiver))))),
+        })
+    }
+
+    #[napi]
+    pub async fn next_event_json(&self) -> Result<Option<String>> {
+        let receiver = self.events.lock().map_err(napi_error)?.take();
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        let worker = Arc::clone(&receiver);
+        let item = tokio::task::spawn_blocking(move || {
+            worker.lock().ok().and_then(|receiver| receiver.recv().ok())
+        })
+        .await
+        .map_err(napi_error)?;
+        match item {
+            Some(Ok(event)) => {
+                *self.events.lock().map_err(napi_error)? = Some(receiver);
+                serde_json::to_string(&event).map(Some).map_err(napi_error)
+            }
+            Some(Err(error)) => Err(Error::from_reason(error)),
+            None => Ok(None),
+        }
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+}
+
+impl Drop for ImageStream {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 
 #[napi]

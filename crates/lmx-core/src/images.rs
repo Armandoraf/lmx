@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Error, RequestContext, Result, endpoint_url, prompt_for_white_key, remove_white_key_background,
@@ -40,6 +43,19 @@ pub struct ImageRequest {
     pub extra_body: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageStreamRequest {
+    #[serde(flatten)]
+    pub image: ImageRequest,
+    #[serde(default = "default_partial_images")]
+    pub partial_images: u8,
+}
+
+fn default_partial_images() -> u8 {
+    2
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageJob {
@@ -64,6 +80,20 @@ pub struct ImageResult {
     pub job: ImageJob,
     pub content_base64: String,
     pub content_type: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageStreamEvent {
+    Partial {
+        index: u8,
+        result: ImageResult,
+    },
+    Completed {
+        result: ImageResult,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<Value>,
+    },
 }
 
 struct ImageSpec {
@@ -377,6 +407,232 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
             background: request.background,
             background_processing: white_keying.then_some("white_keying".into()),
         },
+        content_base64: STANDARD.encode(content),
+        content_type,
+    })
+}
+
+/// Stream partial images from the OpenAI-compatible Image API.
+///
+/// Image generation and editing use distinct request encodings, but both emit
+/// the same SSE payload shape. Keeping that normalization here lets bindings
+/// expose one stable image-streaming API.
+pub async fn stream_image<F>(
+    request: ImageStreamRequest,
+    cancellation: &CancellationToken,
+    mut on_event: F,
+) -> Result<()>
+where
+    F: FnMut(ImageStreamEvent) -> Result<()>,
+{
+    if request.partial_images > 3 {
+        return Err(Error::State(
+            "partial_images must be between 0 and 3".into(),
+        ));
+    }
+    let image_request = request.image;
+    let prompt = image_request.prompt.trim();
+    if prompt.is_empty() {
+        return Err(Error::State("prompt must not be empty".into()));
+    }
+    let provider = image_request.context.provider.as_str();
+    if provider == "nanogpt" {
+        return Err(Error::UnsupportedCapability(
+            provider.into(),
+            "streaming image generation",
+        ));
+    }
+    let spec = image_spec(provider)?;
+    let model = image_request
+        .model
+        .clone()
+        .unwrap_or_else(|| spec.default_model.into());
+    if !spec.models.contains(&model.as_str()) {
+        return Err(Error::UnsupportedModel {
+            provider: provider.into(),
+            model,
+        });
+    }
+    if !model.starts_with("gpt-image-") {
+        return Err(Error::UnsupportedCapability(
+            provider.into(),
+            "streaming image generation for this model",
+        ));
+    }
+    let size = resolve_size(&image_request, &model, spec.sizes)?;
+    let white_keying =
+        image_request.background.as_deref() == Some("transparent") && is_gpt_image_2(&model);
+    let provider_prompt = if white_keying {
+        prompt_for_white_key(prompt)
+    } else {
+        prompt.into()
+    };
+    let provider_size = size.value.clone();
+    let quality = image_request
+        .quality
+        .clone()
+        .unwrap_or_else(|| "high".into());
+    let background = image_request
+        .background
+        .as_ref()
+        .map(|background| if white_keying { "opaque" } else { background }.to_owned());
+    let job = ImageJob {
+        provider: provider.into(),
+        model: model.clone(),
+        prompt: prompt.into(),
+        size: size.value,
+        width: size.width,
+        height: size.height,
+        mime_type: "image/png".into(),
+        background: image_request.background.clone(),
+        background_processing: white_keying.then_some("white_keying".into()),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()?;
+    let mut headers = image_request.context.headers.clone();
+    headers.insert(
+        "Authorization".into(),
+        format!("Bearer {}", image_request.context.api_key),
+    );
+    headers
+        .entry("User-Agent".into())
+        .or_insert_with(|| format!("lmx/{}", crate::VERSION));
+    let mut call = if image_request.input_images.is_empty() {
+        let mut body = json!({
+            "model": model,
+            "prompt": provider_prompt,
+            "size": provider_size,
+            "n": 1,
+            "quality": quality,
+            "stream": true,
+            "partial_images": request.partial_images,
+        });
+        if let Some(background) = &background {
+            body["background"] = json!(background);
+        }
+        client
+            .post(request_url(
+                &image_request.context,
+                spec.base_url,
+                "generations",
+            )?)
+            .json(&body)
+    } else {
+        let mut form = reqwest::multipart::Form::new()
+            .text("model", model)
+            .text("prompt", provider_prompt)
+            .text("size", provider_size)
+            .text("n", "1")
+            .text("quality", quality)
+            .text("stream", "true")
+            .text("partial_images", request.partial_images.to_string());
+        if let Some(background) = background {
+            form = form.text("background", background);
+        }
+        if let Some(fidelity) = &image_request.input_fidelity
+            && !is_gpt_image_2(&job.model)
+        {
+            form = form.text("input_fidelity", fidelity.clone());
+        }
+        for path in &image_request.input_images {
+            let content = std::fs::read(path)
+                .map_err(|_| Error::State(format!("input image not found: {path}")))?;
+            form = form.part(
+                "image[]",
+                reqwest::multipart::Part::bytes(content)
+                    .file_name(path.rsplit('/').next().unwrap_or("image.png").to_owned()),
+            );
+        }
+        client
+            .post(request_url(&image_request.context, spec.base_url, "edits")?)
+            .multipart(form)
+    };
+    for (name, value) in headers {
+        call = call.header(name, value);
+    }
+    let response = tokio::select! {
+        _ = cancellation.cancelled() => return Err(Error::Cancelled),
+        response = call.send() => response?,
+    };
+    if !response.status().is_success() {
+        return Err(Error::HttpStatus {
+            status: response.status().as_u16(),
+            body: response.text().await.unwrap_or_default(),
+        });
+    }
+    let mut source = response.bytes_stream().eventsource();
+    while let Some(next) = tokio::select! {
+        _ = cancellation.cancelled() => return Err(Error::Cancelled),
+        next = source.next() => next,
+    } {
+        let event = next.map_err(|error| Error::Transport(error.to_string()))?;
+        if event.data == "[DONE]" || event.data.trim().is_empty() {
+            continue;
+        }
+        let payload: Value = serde_json::from_str(&event.data)?;
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or(&event.event);
+        let encoded = payload
+            .get("b64_json")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        match event_type {
+            "image_generation.partial_image" | "image_edit.partial_image" => {
+                let encoded = encoded.ok_or_else(|| {
+                    Error::Event("partial image event did not include b64_json".into())
+                })?;
+                let index = payload
+                    .get("partial_image_index")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        Error::Event(
+                            "partial image event did not include partial_image_index".into(),
+                        )
+                    })?
+                    .try_into()
+                    .map_err(|_| Error::Event("partial image index exceeds u8".into()))?;
+                on_event(ImageStreamEvent::Partial {
+                    index,
+                    result: image_result_from_base64(job.clone(), encoded, white_keying)?,
+                })?;
+            }
+            "image_generation.completed" | "image_edit.completed" => {
+                let encoded = encoded.ok_or_else(|| {
+                    Error::Event("completed image event did not include b64_json".into())
+                })?;
+                on_event(ImageStreamEvent::Completed {
+                    result: image_result_from_base64(job.clone(), encoded, white_keying)?,
+                    usage: payload.get("usage").cloned(),
+                })?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    Err(Error::Event(
+        "image stream ended before a completed event".into(),
+    ))
+}
+
+fn image_result_from_base64(
+    job: ImageJob,
+    encoded: &str,
+    white_keying: bool,
+) -> Result<ImageResult> {
+    let mut content = STANDARD
+        .decode(encoded)
+        .map_err(|error| Error::Event(format!("invalid base64 image payload: {error}")))?;
+    let content_type = if white_keying {
+        content = remove_white_key_background(&content)?;
+        "image/png".into()
+    } else {
+        job.mime_type.clone()
+    };
+    Ok(ImageResult {
+        job,
         content_base64: STANDARD.encode(content),
         content_type,
     })

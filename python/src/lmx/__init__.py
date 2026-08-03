@@ -7,6 +7,7 @@ from base64 import b64decode
 from typing import Any
 
 from ._native import (
+    ImageStream as _ImageStream,
     ResponseSession,
     build_message_item_json,
     build_wire_request_json,
@@ -24,6 +25,7 @@ __all__ = [
     "build_wire_request",
     "build_message_item",
     "generate_image",
+    "stream_image",
     "generate_video",
     "load_request_context",
     "output_text_from_items",
@@ -66,6 +68,32 @@ def generate_image(request: dict[str, Any]) -> dict[str, Any]:
     result = json.loads(generate_image_json(json.dumps(payload)))
     result["content"] = b64decode(result.pop("contentBase64"))
     return result
+
+
+def stream_image(request: dict[str, Any]):
+    """Yield progressive image previews followed by the completed image.
+
+    ``partialImages`` defaults to 2 and may be set from 0 through 3. Input
+    images select the edits endpoint; otherwise the generation endpoint is used.
+    """
+    payload = dict(request)
+    if "context" not in payload and "provider" in payload:
+        payload["context"] = load_request_context(str(payload.pop("provider")))
+    stream = _ImageStream(json.dumps(payload))
+    try:
+        while True:
+            encoded = stream.next_event_json()
+            if encoded is None:
+                return
+            event = json.loads(encoded)
+            result = event["result"]
+            result["content"] = b64decode(result.pop("contentBase64"))
+            event["result"] = result
+            yield event
+            if event["type"] == "completed":
+                return
+    finally:
+        stream.cancel()
 
 
 def generate_video(request: dict[str, Any]) -> dict[str, Any]:
