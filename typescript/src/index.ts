@@ -88,7 +88,6 @@ export type ResponseRequest = {
   toolHandlers?: Record<string, ToolHandler>;
   reasoningEffort?: string;
   textVerbosity?: string;
-  maxToolRoundtrips?: number;
 };
 
 export const providerRegistry = (): ProviderSpec[] =>

@@ -36,17 +36,12 @@ pub struct ResponseRequest {
     pub reasoning_effort: Option<String>,
     #[serde(default = "default_verbosity")]
     pub text_verbosity: String,
-    #[serde(default = "default_max_roundtrips")]
-    pub max_tool_roundtrips: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_format: Option<Value>,
 }
 
 fn default_verbosity() -> String {
     "low".into()
-}
-fn default_max_roundtrips() -> u8 {
-    8
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -364,12 +359,6 @@ impl ResponseMachine {
                 },
             });
         }
-        if self.tool_roundtrips >= self.request.max_tool_roundtrips {
-            return Err(Error::State(format!(
-                "model exceeded max tool round-trips ({}) in one response",
-                self.request.max_tool_roundtrips
-            )));
-        }
         self.tool_roundtrips += 1;
         Ok(NextAction::ToolCalls { calls })
     }
@@ -596,5 +585,39 @@ mod tests {
         assert!(
             matches!(machine.finish_round(), Err(Error::State(message)) if message.contains("completed stream event"))
         );
+    }
+
+    #[test]
+    fn permits_more_than_the_previous_tool_roundtrip_limit() {
+        let mut machine = ResponseMachine::new(&ProviderRegistry::default(), request()).unwrap();
+        for index in 0..9 {
+            machine
+                .ingest(&json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "name": "continue",
+                        "call_id": format!("call_{index}"),
+                        "arguments": "{}"
+                    }
+                }))
+                .unwrap();
+            machine
+                .ingest(&json!({"type": "response.completed"}))
+                .unwrap();
+            assert!(matches!(
+                machine.finish_round().unwrap(),
+                NextAction::ToolCalls { .. }
+            ));
+            machine
+                .submit_tool_outputs([ToolOutput {
+                    call_id: format!("call_{index}"),
+                    result: json!({"ok": true}),
+                    content: None,
+                }])
+                .unwrap();
+        }
+        assert_eq!(machine.tool_roundtrips, 9);
     }
 }
