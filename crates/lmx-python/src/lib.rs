@@ -1,0 +1,132 @@
+use lmx_core::{
+    ImageRequest, ProviderRegistry, ResponseMachine, ResponseRequest, ToolOutput, VERSION,
+    VideoRequest, build_message_item, execute_round, generate_image, generate_video,
+    load_request_context, output_text_from_items,
+};
+use pyo3::prelude::*;
+use std::sync::Mutex;
+
+fn api_error(error: impl std::fmt::Display) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+fn version() -> &'static str {
+    VERSION
+}
+
+#[pyfunction]
+fn provider_registry_json() -> String {
+    ProviderRegistry::default().as_json().to_string()
+}
+
+#[pyfunction]
+fn load_request_context_json(provider_json: &str) -> PyResult<String> {
+    let provider = serde_json::from_str(provider_json).map_err(api_error)?;
+    serde_json::to_string(&load_request_context(provider).map_err(api_error)?).map_err(api_error)
+}
+
+#[pyfunction]
+fn build_message_item_json(role: &str, text: &str) -> PyResult<String> {
+    serde_json::to_string(&build_message_item(role, text).map_err(api_error)?).map_err(api_error)
+}
+
+#[pyfunction]
+fn output_text_from_items_json(items_json: &str) -> PyResult<String> {
+    let items: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(items_json).map_err(api_error)?;
+    Ok(output_text_from_items(&items))
+}
+
+/// Build the exact request that LMX's Rust engine would send. The Python
+/// facade uses this during the staged migration and it gives callers a stable
+/// introspection seam without reimplementing provider logic.
+#[pyfunction]
+fn build_wire_request_json(request_json: &str) -> PyResult<String> {
+    let request: ResponseRequest = serde_json::from_str(request_json).map_err(api_error)?;
+    let machine = ResponseMachine::new(&ProviderRegistry::default(), request).map_err(api_error)?;
+    serde_json::to_string(&machine.wire_request().map_err(api_error)?).map_err(api_error)
+}
+
+#[pyfunction]
+fn generate_image_json(request_json: &str) -> PyResult<String> {
+    let request: ImageRequest = serde_json::from_str(request_json).map_err(api_error)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(api_error)?;
+    serde_json::to_string(
+        &runtime
+            .block_on(generate_image(request))
+            .map_err(api_error)?,
+    )
+    .map_err(api_error)
+}
+
+#[pyfunction]
+fn generate_video_json(request_json: &str) -> PyResult<String> {
+    let request: VideoRequest = serde_json::from_str(request_json).map_err(api_error)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(api_error)?;
+    serde_json::to_string(
+        &runtime
+            .block_on(generate_video(request))
+            .map_err(api_error)?,
+    )
+    .map_err(api_error)
+}
+
+#[pyclass]
+struct ResponseSession {
+    machine: Mutex<ResponseMachine>,
+}
+
+#[pymethods]
+impl ResponseSession {
+    #[new]
+    fn new(request_json: &str) -> PyResult<Self> {
+        let request: ResponseRequest = serde_json::from_str(request_json).map_err(api_error)?;
+        Ok(Self {
+            machine: Mutex::new(
+                ResponseMachine::new(&ProviderRegistry::default(), request).map_err(api_error)?,
+            ),
+        })
+    }
+
+    fn execute_round_json(&self) -> PyResult<String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(api_error)?;
+        let mut machine = self.machine.lock().map_err(api_error)?;
+        serde_json::to_string(
+            &runtime
+                .block_on(execute_round(&mut machine))
+                .map_err(api_error)?,
+        )
+        .map_err(api_error)
+    }
+
+    fn submit_tool_outputs_json(&self, outputs_json: &str) -> PyResult<String> {
+        let outputs: Vec<ToolOutput> = serde_json::from_str(outputs_json).map_err(api_error)?;
+        let mut machine = self.machine.lock().map_err(api_error)?;
+        serde_json::to_string(&machine.submit_tool_outputs(outputs).map_err(api_error)?)
+            .map_err(api_error)
+    }
+}
+
+#[pymodule]
+fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(version, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_registry_json, module)?)?;
+    module.add_function(wrap_pyfunction!(load_request_context_json, module)?)?;
+    module.add_function(wrap_pyfunction!(build_message_item_json, module)?)?;
+    module.add_function(wrap_pyfunction!(output_text_from_items_json, module)?)?;
+    module.add_function(wrap_pyfunction!(build_wire_request_json, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_image_json, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_video_json, module)?)?;
+    module.add_class::<ResponseSession>()?;
+    Ok(())
+}

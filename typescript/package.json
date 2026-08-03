@@ -1,0 +1,20 @@
+{
+  "name": "@armandoraf/lmx",
+  "version": "0.1.0",
+  "description": "TypeScript bindings for the LMX provider engine",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "native.js", "native.d.ts", "*.node"],
+  "scripts": {
+    "build": "npm run build:native && tsc -p tsconfig.json",
+    "build:native": "napi build --platform --release --manifest-path ../crates/lmx-node/Cargo.toml --output-dir . --js native.js --dts native.d.ts --esm",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.6.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}

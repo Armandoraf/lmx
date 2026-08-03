@@ -1,0 +1,18 @@
+[package]
+name = "lmx-python"
+description = "Python bindings for lmx-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+lmx-core = { path = "../lmx-core" }
+pyo3.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

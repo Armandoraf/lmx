@@ -1,0 +1,10 @@
+{
+  "input": [
+    { "type": "message", "role": "user", "content": "Hello" }
+  ],
+  "context": {
+    "provider": "openai",
+    "apiKey": "test-key"
+  },
+  "instructions": "Answer concisely."
+}

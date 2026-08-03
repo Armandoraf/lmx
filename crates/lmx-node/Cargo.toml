@@ -1,0 +1,21 @@
+[package]
+name = "lmx-node"
+description = "Node bindings for lmx-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+# napi-rs is deliberately isolated here.  The core has no JavaScript dependency.
+[dependencies]
+lmx-core = { path = "../lmx-core" }
+napi = { version = "3.4.0", default-features = false, features = ["napi6", "tokio_rt"] }
+napi-derive = "3.3.0"
+serde_json.workspace = true
+
+[build-dependencies]
+napi-build = "2.2.4"
