@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    Error, RequestContext, Result, endpoint_url, prompt_for_chroma_key,
-    remove_chroma_key_background,
+    Error, RequestContext, Result, endpoint_url, prompt_for_foreground_matte,
+    remove_background_with_foreground_matte,
 };
 
 const OPENAI_SIZES: &[&str] = &["1024x1024", "1536x1024", "1024x1536"];
@@ -208,9 +208,10 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
         ));
     }
     let size = resolve_size(&request, &model, spec.sizes)?;
-    let chroma_key = request.background.as_deref() == Some("transparent") && is_gpt_image_2(&model);
-    let provider_prompt = if chroma_key {
-        prompt_for_chroma_key(prompt)
+    let foreground_matting =
+        request.background.as_deref() == Some("transparent") && is_gpt_image_2(&model);
+    let provider_prompt = if foreground_matting {
+        prompt_for_foreground_matte(prompt)
     } else {
         prompt.into()
     };
@@ -240,7 +241,11 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
     } else {
         body["quality"] = json!(request.quality.as_deref().unwrap_or("high"));
         if let Some(background) = &request.background {
-            body["background"] = json!(if chroma_key { "opaque" } else { background });
+            body["background"] = json!(if foreground_matting {
+                "opaque"
+            } else {
+                background
+            });
         }
     }
     let mut headers = request.context.headers.clone();
@@ -267,7 +272,12 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
         if let Some(background) = &request.background {
             form = form.text(
                 "background",
-                if chroma_key { "opaque" } else { background }.to_owned(),
+                if foreground_matting {
+                    "opaque"
+                } else {
+                    background
+                }
+                .to_owned(),
             );
         }
         if let Some(fidelity) = &request.input_fidelity
@@ -359,8 +369,8 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
             "image response did not include b64_json or url content".into(),
         ));
     };
-    let content_type = if chroma_key {
-        content = remove_chroma_key_background(&content)?;
+    let content_type = if foreground_matting {
+        content = remove_background_with_foreground_matte(&content)?;
         "image/png".into()
     } else {
         content_type
@@ -375,7 +385,7 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
             height: size.height,
             mime_type: content_type.clone(),
             background: request.background,
-            background_processing: chroma_key.then_some("chroma_key".into()),
+            background_processing: foreground_matting.then_some("foreground_matting".into()),
         },
         content_base64: STANDARD.encode(content),
         content_type,
