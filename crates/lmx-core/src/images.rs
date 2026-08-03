@@ -11,6 +11,10 @@ use crate::{
 
 const OPENAI_SIZES: &[&str] = &["1024x1024", "1536x1024", "1024x1536"];
 const NANOGPT_SIZES: &[&str] = &["1024x1024"];
+const GPT_IMAGE_2_MAX_EDGE: u32 = 3_840;
+const GPT_IMAGE_2_DIMENSION_MULTIPLE: u32 = 16;
+const GPT_IMAGE_2_MIN_PIXELS: u64 = 655_360;
+const GPT_IMAGE_2_MAX_PIXELS: u64 = 8_294_400;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,8 +48,10 @@ pub struct ImageJob {
     pub model: String,
     pub prompt: String,
     pub size: String,
-    pub width: u32,
-    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
     pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
@@ -92,21 +98,14 @@ fn image_spec(provider: &str) -> Result<ImageSpec> {
     }
 }
 
-fn resolve_size(request: &ImageRequest, sizes: &[&str]) -> Result<(String, u32, u32)> {
-    let size = request
-        .size
-        .clone()
-        .or_else(|| match (request.width, request.height) {
-            (Some(width), Some(height)) => Some(format!("{width}x{height}")),
-            _ => None,
-        })
-        .unwrap_or_else(|| sizes[0].into());
-    if !sizes.contains(&size.as_str()) {
-        return Err(Error::State(format!(
-            "unsupported image size {size}; supported: {}",
-            sizes.join(", ")
-        )));
-    }
+#[derive(Debug)]
+struct ResolvedSize {
+    value: String,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn parse_dimensions(size: &str) -> Result<(u32, u32)> {
     let (width, height) = size
         .split_once('x')
         .ok_or_else(|| Error::State(format!("image size must use WIDTHxHEIGHT format: {size}")))?;
@@ -116,7 +115,57 @@ fn resolve_size(request: &ImageRequest, sizes: &[&str]) -> Result<(String, u32, 
     let height = height
         .parse()
         .map_err(|_| Error::State("image height must be an integer".into()))?;
-    Ok((size, width, height))
+    Ok((width, height))
+}
+
+fn validate_gpt_image_2_size(width: u32, height: u32) -> Result<()> {
+    let longest_edge = width.max(height);
+    let shortest_edge = width.min(height);
+    let pixels = u64::from(width) * u64::from(height);
+    let valid = longest_edge <= GPT_IMAGE_2_MAX_EDGE
+        && width.is_multiple_of(GPT_IMAGE_2_DIMENSION_MULTIPLE)
+        && height.is_multiple_of(GPT_IMAGE_2_DIMENSION_MULTIPLE)
+        && u64::from(longest_edge) <= u64::from(shortest_edge) * 3
+        && (GPT_IMAGE_2_MIN_PIXELS..=GPT_IMAGE_2_MAX_PIXELS).contains(&pixels);
+    if valid {
+        return Ok(());
+    }
+    Err(Error::State(format!(
+        "unsupported gpt-image-2 size {width}x{height}; dimensions must be multiples of {GPT_IMAGE_2_DIMENSION_MULTIPLE}, each edge at most {GPT_IMAGE_2_MAX_EDGE}px, aspect ratio at most 3:1, and total pixels between {GPT_IMAGE_2_MIN_PIXELS} and {GPT_IMAGE_2_MAX_PIXELS}"
+    )))
+}
+
+fn resolve_size(request: &ImageRequest, model: &str, sizes: &[&str]) -> Result<ResolvedSize> {
+    let size = request
+        .size
+        .clone()
+        .or_else(|| match (request.width, request.height) {
+            (Some(width), Some(height)) => Some(format!("{width}x{height}")),
+            _ => None,
+        })
+        .unwrap_or_else(|| sizes[0].into());
+    if is_gpt_image_2(model) && size == "auto" {
+        return Ok(ResolvedSize {
+            value: size,
+            width: None,
+            height: None,
+        });
+    }
+    if !is_gpt_image_2(model) && !sizes.contains(&size.as_str()) {
+        return Err(Error::State(format!(
+            "unsupported image size {size}; supported: {}",
+            sizes.join(", ")
+        )));
+    }
+    let (width, height) = parse_dimensions(&size)?;
+    if is_gpt_image_2(model) {
+        validate_gpt_image_2_size(width, height)?;
+    }
+    Ok(ResolvedSize {
+        value: size,
+        width: Some(width),
+        height: Some(height),
+    })
 }
 
 fn is_gpt_image_2(model: &str) -> bool {
@@ -158,7 +207,7 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
             "image background selection",
         ));
     }
-    let (size, width, height) = resolve_size(&request, spec.sizes)?;
+    let size = resolve_size(&request, &model, spec.sizes)?;
     let chroma_key = request.background.as_deref() == Some("transparent") && is_gpt_image_2(&model);
     let provider_prompt = if chroma_key {
         prompt_for_chroma_key(prompt)
@@ -168,7 +217,7 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
     let provider_size = match model.as_str() {
         "qwen-image" => "auto".into(),
         "z-image-turbo" => "1024*1024".into(),
-        _ => size.clone(),
+        _ => size.value.clone(),
     };
     let mut body =
         json!({"model": model, "prompt": provider_prompt, "size": provider_size, "n": 1});
@@ -230,7 +279,7 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
             let content = std::fs::read(path)
                 .map_err(|_| Error::State(format!("input image not found: {path}")))?;
             form = form.part(
-                "image",
+                "image[]",
                 reqwest::multipart::Part::bytes(content)
                     .file_name(path.rsplit('/').next().unwrap_or("image.png").to_owned()),
             );
@@ -321,9 +370,9 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
             provider: provider.into(),
             model,
             prompt: prompt.into(),
-            size,
-            width,
-            height,
+            size: size.value,
+            width: size.width,
+            height: size.height,
             mime_type: content_type.clone(),
             background: request.background,
             background_processing: chroma_key.then_some("chroma_key".into()),
@@ -331,4 +380,103 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
         content_base64: STANDARD.encode(content),
         content_type,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Provider;
+
+    fn request(size: Option<&str>, width: Option<u32>, height: Option<u32>) -> ImageRequest {
+        ImageRequest {
+            prompt: "test".into(),
+            context: RequestContext {
+                provider: Provider::Azure,
+                api_key: "test".into(),
+                base_url: None,
+                headers: BTreeMap::new(),
+                query: BTreeMap::new(),
+            },
+            model: None,
+            size: size.map(str::to_owned),
+            width,
+            height,
+            quality: None,
+            background: None,
+            input_images: Vec::new(),
+            input_fidelity: None,
+            extra_body: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn gpt_image_2_accepts_auto_and_constrained_dimensions() {
+        let automatic = resolve_size(
+            &request(Some("auto"), None, None),
+            "gpt-image-2",
+            OPENAI_SIZES,
+        )
+        .unwrap();
+        assert_eq!(automatic.value, "auto");
+        assert_eq!(automatic.width, None);
+        assert_eq!(automatic.height, None);
+
+        for size in ["2048x2048", "3840x2160", "2160x3840"] {
+            let resolved = resolve_size(
+                &request(Some(size), None, None),
+                "gpt-image-2",
+                OPENAI_SIZES,
+            )
+            .unwrap();
+            assert_eq!(resolved.value, size);
+            assert_eq!(
+                resolved.width.zip(resolved.height),
+                size.split_once('x')
+                    .map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap()))
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_image_2_keeps_the_existing_default_size() {
+        let resolved =
+            resolve_size(&request(None, None, None), "gpt-image-2", OPENAI_SIZES).unwrap();
+        assert_eq!(resolved.value, "1024x1024");
+        assert_eq!(resolved.width, Some(1024));
+        assert_eq!(resolved.height, Some(1024));
+    }
+
+    #[test]
+    fn gpt_image_2_rejects_dimensions_outside_its_constraints() {
+        for size in [
+            "1025x1024",
+            "4096x1024",
+            "1024x4096",
+            "512x512",
+            "3840x2176",
+        ] {
+            let error = resolve_size(
+                &request(Some(size), None, None),
+                "gpt-image-2",
+                OPENAI_SIZES,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("unsupported gpt-image-2 size"));
+        }
+    }
+
+    #[test]
+    fn other_models_keep_their_fixed_size_allowlists() {
+        let resolved =
+            resolve_size(&request(None, None, None), "gpt-image-1", OPENAI_SIZES).unwrap();
+        assert_eq!(resolved.value, "1024x1024");
+
+        let error = resolve_size(
+            &request(Some("2048x2048"), None, None),
+            "gpt-image-1",
+            OPENAI_SIZES,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unsupported image size"));
+    }
 }

@@ -126,8 +126,8 @@ export type ImageJob = {
   model: string;
   prompt: string;
   size: string;
-  width: number;
-  height: number;
+  width?: number;
+  height?: number;
   mimeType: string;
   background?: string;
   backgroundProcessing?: string;

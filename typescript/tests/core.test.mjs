@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { z } from 'zod';
 
@@ -77,10 +80,20 @@ test('streamResponse yields a text delta before the SSE stream completes', async
 });
 
 test('the Rust media engine generates OpenAI-compatible image and video requests', async () => {
+  let editBody = '';
   await withServer((request, response) => {
     if (request.url === '/images/generations') {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ data: [{ b64_json: Buffer.from('image-bytes').toString('base64') }] }));
+      return;
+    }
+    if (request.url === '/images/edits') {
+      request.setEncoding('latin1');
+      request.on('data', chunk => { editBody += chunk; });
+      request.on('end', () => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ data: [{ b64_json: Buffer.from('edited-image-bytes').toString('base64') }] }));
+      });
       return;
     }
     if (request.url === '/videos') {
@@ -98,10 +111,21 @@ test('the Rust media engine generates OpenAI-compatible image and video requests
   }, async baseUrl => {
     const context = { provider: 'azure', apiKey: 'test', baseUrl };
     const image = await generateImage({ context, model: 'gpt-image-2', prompt: 'A blue square' });
+    const tempDir = await mkdtemp(join(tmpdir(), 'lmx-image-test-'));
+    const inputImage = join(tempDir, 'reference.png');
+    await writeFile(inputImage, 'reference-image-bytes');
+    const editedImage = await generateImage({
+      context,
+      model: 'gpt-image-2',
+      prompt: 'Turn the blue square red',
+      inputImages: [inputImage]
+    });
     const video = await generateVideo({ context, model: 'sora-2', prompt: 'A blue square moving' });
     assert.equal(Buffer.from(image.content).toString(), 'image-bytes');
+    assert.equal(Buffer.from(editedImage.content).toString(), 'edited-image-bytes');
     assert.equal(Buffer.from(video.content).toString(), 'video-bytes');
   });
+  assert.match(editBody, /name="image\[\]"/);
 });
 
 test('the registry reads configured model catalogs in the Rust core', () => {
