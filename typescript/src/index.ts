@@ -26,6 +26,14 @@ type Native = {
 
 const core = native as Native;
 
+const packageVersion = '0.1.8';
+
+if (core.version() !== packageVersion) {
+  throw new Error(
+    `@armandoraf/lmx JavaScript (${packageVersion}) and native (${core.version()}) versions must match. Reinstall dependencies.`,
+  );
+}
+
 export type WireRequest = {
   method: 'POST';
   url: string;
