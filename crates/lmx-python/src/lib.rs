@@ -9,6 +9,8 @@ use pyo3::prelude::*;
 use std::sync::{Arc, Mutex, mpsc};
 
 type FrameReceiver = Arc<Mutex<mpsc::Receiver<ResponseFrame>>>;
+type ImageEventReceiver = mpsc::Receiver<std::result::Result<ImageStreamEvent, String>>;
+type SharedImageEventReceiver = Arc<Mutex<ImageEventReceiver>>;
 
 fn api_error(error: impl std::fmt::Display) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(error.to_string())
@@ -85,9 +87,7 @@ fn generate_image_json(request_json: &str) -> PyResult<String> {
 #[pyclass]
 struct ImageStream {
     cancellation: CancellationToken,
-    events: Arc<
-        Mutex<Option<Arc<Mutex<mpsc::Receiver<std::result::Result<ImageStreamEvent, String>>>>>>,
-    >,
+    events: Arc<Mutex<Option<SharedImageEventReceiver>>>,
 }
 
 #[pymethods]
