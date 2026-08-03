@@ -51,9 +51,12 @@ export type ProviderSpec = {
   baseUrl?: string;
   capabilities: ProviderCapabilities;
 };
+export type ToolOutputContentItem =
+  | { type: 'input_text'; text: string }
+  | { type: 'input_image'; image_url: string; detail?: 'auto' | 'low' | 'high' | 'original' };
 export type ToolResult =
   | { type: 'json'; result: unknown }
-  | { type: 'content'; result: unknown; content: ResponseItem[] };
+  | { type: 'content'; result: unknown; content: ToolOutputContentItem[] };
 export type ToolHandler = (arguments_: Record<string, unknown>) => ToolResult | Promise<ToolResult>;
 export type TextDeltaEvent = { type: 'text_delta'; delta: string };
 export type OutputItemEvent = { type: 'output_item'; outputIndex: number; item: ResponseItem };
