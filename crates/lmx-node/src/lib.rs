@@ -2,7 +2,7 @@ use lmx_core::{
     CancellationToken, ImageRequest, ImageStreamEvent, ImageStreamRequest, ProviderRegistry,
     ResponseFrame, ResponseMachine, ResponseRequest, ToolOutput, VERSION, VideoRequest,
     build_message_item, execute_round_with_cancellation, execute_round_with_observer,
-    generate_image, generate_video, load_request_context, normalize_tool_output,
+    generate_image, generate_images, generate_video, load_request_context, normalize_tool_output,
     output_text_from_items, stream_image, tool_failure_output,
 };
 use napi::bindgen_prelude::*;
@@ -72,6 +72,12 @@ pub fn build_wire_request_json(request_json: String) -> Result<String> {
 pub async fn generate_image_json(request_json: String) -> Result<String> {
     let request: ImageRequest = serde_json::from_str(&request_json).map_err(napi_error)?;
     serde_json::to_string(&generate_image(request).await.map_err(napi_error)?).map_err(napi_error)
+}
+
+#[napi]
+pub async fn generate_images_json(request_json: String) -> Result<String> {
+    let request: ImageRequest = serde_json::from_str(&request_json).map_err(napi_error)?;
+    serde_json::to_string(&generate_images(request).await.map_err(napi_error)?).map_err(napi_error)
 }
 
 #[napi]

@@ -39,8 +39,14 @@ pub struct ImageRequest {
     pub input_images: Vec<String>,
     #[serde(default)]
     pub input_fidelity: Option<String>,
+    #[serde(default = "default_image_count")]
+    pub count: u8,
     #[serde(default)]
     pub extra_body: BTreeMap<String, Value>,
+}
+
+fn default_image_count() -> u8 {
+    1
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -83,14 +89,26 @@ pub struct ImageResult {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBatchResult {
+    pub images: Vec<ImageResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageStreamEvent {
     Partial {
-        index: u8,
+        image_index: u8,
+        partial_index: u8,
         result: ImageResult,
     },
     Completed {
+        image_index: u8,
         result: ImageResult,
+    },
+    BatchCompleted {
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<Value>,
     },
@@ -214,9 +232,26 @@ fn request_url(context: &RequestContext, fallback: &str, route: &str) -> Result<
 }
 
 pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
+    if request.count != 1 {
+        return Err(Error::State(
+            "generate_image requires count=1; use generate_images for batches".into(),
+        ));
+    }
+    let batch = generate_images(request).await?;
+    batch
+        .images
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Event("image response did not include any images".into()))
+}
+
+pub async fn generate_images(request: ImageRequest) -> Result<ImageBatchResult> {
     let prompt = request.prompt.trim();
     if prompt.is_empty() {
         return Err(Error::State("prompt must not be empty".into()));
+    }
+    if !(1..=10).contains(&request.count) {
+        return Err(Error::State("count must be between 1 and 10".into()));
     }
     let provider = request.context.provider.as_str();
     let spec = image_spec(provider)?;
@@ -249,8 +284,12 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
         "z-image-turbo" => "1024*1024".into(),
         _ => size.value.clone(),
     };
-    let mut body =
-        json!({"model": model, "prompt": provider_prompt, "size": provider_size, "n": 1});
+    let mut body = json!({
+        "model": model,
+        "prompt": provider_prompt,
+        "size": provider_size,
+        "n": request.count,
+    });
     if provider == "nanogpt" {
         body["response_format"] = json!("url");
         let mut extra = match model.as_str() {
@@ -289,7 +328,7 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
             .text("model", model.clone())
             .text("prompt", provider_prompt.clone())
             .text("size", provider_size.clone())
-            .text("n", "1")
+            .text("n", request.count.to_string())
             .text(
                 "quality",
                 request.quality.clone().unwrap_or_else(|| "high".into()),
@@ -349,66 +388,31 @@ pub async fn generate_image(request: ImageRequest) -> Result<ImageResult> {
         });
     }
     let response: Value = response.json().await?;
-    let image = response
+    let images = response
         .get("data")
         .and_then(Value::as_array)
-        .and_then(|items| items.first())
+        .filter(|items| items.len() == usize::from(request.count))
         .ok_or_else(|| Error::Event("image response did not include any images".into()))?;
-    let (mut content, content_type) = if let Some(encoded) = image
-        .get("b64_json")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    {
-        (
-            STANDARD
-                .decode(encoded)
-                .map_err(|error| Error::Event(format!("invalid base64 image payload: {error}")))?,
-            "image/png".into(),
-        )
-    } else if let Some(url) = image
-        .get("url")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    {
-        let download = client.get(url).send().await?;
-        if !download.status().is_success() {
-            return Err(Error::HttpStatus {
-                status: download.status().as_u16(),
-                body: download.text().await.unwrap_or_default(),
-            });
-        };
-        let content_type = download
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("image/png")
-            .to_owned();
-        (download.bytes().await?.to_vec(), content_type)
-    } else {
-        return Err(Error::Event(
-            "image response did not include b64_json or url content".into(),
-        ));
+    let job = ImageJob {
+        provider: provider.into(),
+        model,
+        prompt: prompt.into(),
+        size: size.value,
+        width: size.width,
+        height: size.height,
+        mime_type: "image/png".into(),
+        background: request.background,
+        background_processing: white_keying.then_some("white_keying".into()),
     };
-    let content_type = if white_keying {
-        content = remove_white_key_background(&content)?;
-        "image/png".into()
-    } else {
-        content_type
-    };
-    Ok(ImageResult {
-        job: ImageJob {
-            provider: provider.into(),
-            model,
-            prompt: prompt.into(),
-            size: size.value,
-            width: size.width,
-            height: size.height,
-            mime_type: content_type.clone(),
-            background: request.background,
-            background_processing: white_keying.then_some("white_keying".into()),
-        },
-        content_base64: STANDARD.encode(content),
-        content_type,
+    let mut results = Vec::with_capacity(images.len());
+    for image in images {
+        results.push(
+            image_result_from_response_image(job.clone(), image, &client, white_keying).await?,
+        );
+    }
+    Ok(ImageBatchResult {
+        images: results,
+        usage: response.get("usage").cloned(),
     })
 }
 
@@ -431,6 +435,22 @@ where
         ));
     }
     let image_request = request.image;
+    if !(1..=10).contains(&image_request.count) {
+        return Err(Error::State("count must be between 1 and 10".into()));
+    }
+    if image_request.count > 1 {
+        let batch = generate_images(image_request).await?;
+        for (image_index, result) in batch.images.into_iter().enumerate() {
+            on_event(ImageStreamEvent::Completed {
+                image_index: image_index
+                    .try_into()
+                    .map_err(|_| Error::Event("image index exceeds u8".into()))?,
+                result,
+            })?;
+        }
+        on_event(ImageStreamEvent::BatchCompleted { usage: batch.usage })?;
+        return Ok(());
+    }
     let prompt = image_request.prompt.trim();
     if prompt.is_empty() {
         return Err(Error::State("prompt must not be empty".into()));
@@ -503,7 +523,7 @@ where
             "model": model,
             "prompt": provider_prompt,
             "size": provider_size,
-            "n": 1,
+            "n": image_request.count,
             "quality": quality,
             "stream": true,
             "partial_images": request.partial_images,
@@ -523,7 +543,7 @@ where
             .text("model", model)
             .text("prompt", provider_prompt)
             .text("size", provider_size)
-            .text("n", "1")
+            .text("n", image_request.count.to_string())
             .text("quality", quality)
             .text("stream", "true")
             .text("partial_images", request.partial_images.to_string());
@@ -595,7 +615,8 @@ where
                     .try_into()
                     .map_err(|_| Error::Event("partial image index exceeds u8".into()))?;
                 on_event(ImageStreamEvent::Partial {
-                    index,
+                    image_index: 0,
+                    partial_index: index,
                     result: image_result_from_base64(job.clone(), encoded, white_keying)?,
                 })?;
             }
@@ -604,7 +625,10 @@ where
                     Error::Event("completed image event did not include b64_json".into())
                 })?;
                 on_event(ImageStreamEvent::Completed {
+                    image_index: 0,
                     result: image_result_from_base64(job.clone(), encoded, white_keying)?,
+                })?;
+                on_event(ImageStreamEvent::BatchCompleted {
                     usage: payload.get("usage").cloned(),
                 })?;
                 return Ok(());
@@ -615,6 +639,61 @@ where
     Err(Error::Event(
         "image stream ended before a completed event".into(),
     ))
+}
+
+async fn image_result_from_response_image(
+    mut job: ImageJob,
+    image: &Value,
+    client: &reqwest::Client,
+    white_keying: bool,
+) -> Result<ImageResult> {
+    let (mut content, content_type) = if let Some(encoded) = image
+        .get("b64_json")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        (
+            STANDARD
+                .decode(encoded)
+                .map_err(|error| Error::Event(format!("invalid base64 image payload: {error}")))?,
+            "image/png".into(),
+        )
+    } else if let Some(url) = image
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        let download = client.get(url).send().await?;
+        if !download.status().is_success() {
+            return Err(Error::HttpStatus {
+                status: download.status().as_u16(),
+                body: download.text().await.unwrap_or_default(),
+            });
+        };
+        let content_type = download
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("image/png")
+            .to_owned();
+        (download.bytes().await?.to_vec(), content_type)
+    } else {
+        return Err(Error::Event(
+            "image response did not include b64_json or url content".into(),
+        ));
+    };
+    let content_type = if white_keying {
+        content = remove_white_key_background(&content)?;
+        "image/png".into()
+    } else {
+        content_type
+    };
+    job.mime_type = content_type.clone();
+    Ok(ImageResult {
+        job,
+        content_base64: STANDARD.encode(content),
+        content_type,
+    })
 }
 
 fn image_result_from_base64(
@@ -661,6 +740,7 @@ mod tests {
             background: None,
             input_images: Vec::new(),
             input_fidelity: None,
+            count: 1,
             extra_body: BTreeMap::new(),
         }
     }

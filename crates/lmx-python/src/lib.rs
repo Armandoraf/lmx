@@ -2,7 +2,7 @@ use lmx_core::{
     CancellationToken, ImageRequest, ImageStreamEvent, ImageStreamRequest, ProviderRegistry,
     ResponseFrame, ResponseMachine, ResponseRequest, ToolOutput, VERSION, VideoRequest,
     build_message_item, execute_round_with_cancellation, execute_round_with_observer,
-    generate_image, generate_video, load_request_context, normalize_tool_output,
+    generate_image, generate_images, generate_video, load_request_context, normalize_tool_output,
     output_text_from_items, stream_image, tool_failure_output,
 };
 use pyo3::prelude::*;
@@ -79,6 +79,21 @@ fn generate_image_json(request_json: &str) -> PyResult<String> {
     serde_json::to_string(
         &runtime
             .block_on(generate_image(request))
+            .map_err(api_error)?,
+    )
+    .map_err(api_error)
+}
+
+#[pyfunction]
+fn generate_images_json(request_json: &str) -> PyResult<String> {
+    let request: ImageRequest = serde_json::from_str(request_json).map_err(api_error)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(api_error)?;
+    serde_json::to_string(
+        &runtime
+            .block_on(generate_images(request))
             .map_err(api_error)?,
     )
     .map_err(api_error)
@@ -315,6 +330,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(tool_failure_output_json, module)?)?;
     module.add_function(wrap_pyfunction!(build_wire_request_json, module)?)?;
     module.add_function(wrap_pyfunction!(generate_image_json, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_images_json, module)?)?;
     module.add_function(wrap_pyfunction!(generate_video_json, module)?)?;
     module.add_class::<ResponseSession>()?;
     module.add_class::<ImageStream>()?;

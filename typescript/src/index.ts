@@ -14,6 +14,7 @@ type Native = {
   toolFailureOutputJson(callId: string, error: string): string;
   buildWireRequestJson(request: string): string;
   generateImageJson(request: string): Promise<string>;
+  generateImagesJson(request: string): Promise<string>;
   ImageStream: new (request: string) => {
     nextEventJson(): Promise<string | null>;
     cancel(): void;
@@ -30,7 +31,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.1.11';
+const packageVersion = '0.1.12';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -152,9 +153,21 @@ export type ImageResult = {
   contentType: string;
 };
 
-export type ImagePartialEvent = { type: 'partial'; index: number; result: ImageResult };
-export type ImageCompletedEvent = { type: 'completed'; result: ImageResult; usage?: Record<string, unknown> };
-export type ImageStreamEvent = ImagePartialEvent | ImageCompletedEvent;
+export type ImageBatchResult = {
+  images: ImageResult[];
+  usage?: Record<string, unknown>;
+};
+
+export type ImagePartialEvent = {
+  type: 'partial'; imageIndex: number; partialIndex: number; result: ImageResult;
+};
+export type ImageCompletedEvent = {
+  type: 'completed'; imageIndex: number; result: ImageResult;
+};
+export type ImageBatchCompletedEvent = {
+  type: 'batch_completed'; usage?: Record<string, unknown>;
+};
+export type ImageStreamEvent = ImagePartialEvent | ImageCompletedEvent | ImageBatchCompletedEvent;
 
 export const generateImage = async (request: Record<string, unknown>): Promise<ImageResult> => {
   const payload = { ...request };
@@ -171,6 +184,28 @@ export const generateImage = async (request: Record<string, unknown>): Promise<I
     job: result.job,
     content: Uint8Array.from(Buffer.from(result.contentBase64, 'base64')),
     contentType: result.contentType
+  };
+};
+
+export const generateImages = async (
+  request: Record<string, unknown>,
+): Promise<ImageBatchResult> => {
+  const payload = { ...request };
+  if (!payload.context && typeof payload.provider === 'string') {
+    payload.context = loadRequestContext(payload.provider);
+    delete payload.provider;
+  }
+  const result = JSON.parse(await core.generateImagesJson(JSON.stringify(payload))) as {
+    images: Array<{ job: ImageJob; contentBase64: string; contentType: string }>;
+    usage?: Record<string, unknown>;
+  };
+  return {
+    images: result.images.map(image => ({
+      job: image.job,
+      content: Uint8Array.from(Buffer.from(image.contentBase64, 'base64')),
+      contentType: image.contentType,
+    })),
+    usage: result.usage,
   };
 };
 
@@ -194,21 +229,30 @@ export async function* streamImage(
       const encoded = await awaitWithSignal(stream.nextEventJson(), signal);
       if (encoded === null) return;
       const event = JSON.parse(encoded) as {
-        type: 'partial' | 'completed';
-        index?: number;
-        result: { job: ImageJob; contentBase64: string; contentType: string };
+        type: 'partial' | 'completed' | 'batch_completed';
+        imageIndex?: number;
+        partialIndex?: number;
+        result?: { job: ImageJob; contentBase64: string; contentType: string };
         usage?: Record<string, unknown>;
       };
+      if (event.type === 'batch_completed') {
+        yield { type: 'batch_completed', usage: event.usage };
+        return;
+      }
       const result: ImageResult = {
-        job: event.result.job,
-        content: Uint8Array.from(Buffer.from(event.result.contentBase64, 'base64')),
-        contentType: event.result.contentType,
+        job: event.result!.job,
+        content: Uint8Array.from(Buffer.from(event.result!.contentBase64, 'base64')),
+        contentType: event.result!.contentType,
       };
       if (event.type === 'partial') {
-        yield { type: 'partial', index: event.index!, result };
+        yield {
+          type: 'partial',
+          imageIndex: event.imageIndex!,
+          partialIndex: event.partialIndex!,
+          result,
+        };
       } else {
-        yield { type: 'completed', result, usage: event.usage };
-        return;
+        yield { type: 'completed', imageIndex: event.imageIndex!, result };
       }
     }
   } finally {

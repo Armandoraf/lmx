@@ -21,6 +21,8 @@ export declare function buildWireRequestJson(requestJson: string): string
 
 export declare function generateImageJson(requestJson: string): Promise<string>
 
+export declare function generateImagesJson(requestJson: string): Promise<string>
+
 export declare function generateVideoJson(requestJson: string): Promise<string>
 
 export declare function loadRequestContextJson(providerJson: string): string

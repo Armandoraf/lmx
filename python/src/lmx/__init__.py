@@ -12,6 +12,7 @@ from ._native import (
     build_message_item_json,
     build_wire_request_json,
     generate_image_json,
+    generate_images_json,
     generate_video_json,
     load_request_context_json,
     output_text_from_items_json,
@@ -25,6 +26,7 @@ __all__ = [
     "build_wire_request",
     "build_message_item",
     "generate_image",
+    "generate_images",
     "stream_image",
     "generate_video",
     "load_request_context",
@@ -70,8 +72,19 @@ def generate_image(request: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def generate_images(request: dict[str, Any]) -> dict[str, Any]:
+    """Generate one or more images through the Rust engine."""
+    payload = dict(request)
+    if "context" not in payload and "provider" in payload:
+        payload["context"] = load_request_context(str(payload.pop("provider")))
+    result = json.loads(generate_images_json(json.dumps(payload)))
+    for image in result["images"]:
+        image["content"] = b64decode(image.pop("contentBase64"))
+    return result
+
+
 def stream_image(request: dict[str, Any]):
-    """Yield progressive image previews followed by the completed image.
+    """Yield previews and completed images, then a batch-completed event.
 
     ``partialImages`` defaults to 2 and may be set from 0 through 3. Input
     images select the edits endpoint; otherwise the generation endpoint is used.
@@ -86,11 +99,12 @@ def stream_image(request: dict[str, Any]):
             if encoded is None:
                 return
             event = json.loads(encoded)
-            result = event["result"]
-            result["content"] = b64decode(result.pop("contentBase64"))
-            event["result"] = result
+            if "result" in event:
+                result = event["result"]
+                result["content"] = b64decode(result.pop("contentBase64"))
+                event["result"] = result
             yield event
-            if event["type"] == "completed":
+            if event["type"] == "batch_completed":
                 return
     finally:
         stream.cancel()

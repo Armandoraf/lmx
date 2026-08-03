@@ -10,6 +10,7 @@ import {
   availableModelsForProvider,
   defaultModelForProvider,
   generateImage,
+  generateImages,
   generateVideo,
   getProvider,
   streamImage,
@@ -19,7 +20,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.1.11');
+  assert.equal(version(), '0.1.12');
 });
 
 async function withServer(handler, run) {
@@ -152,8 +153,16 @@ test('the Rust media engine generates OpenAI-compatible image and video requests
   let editBody = '';
   await withServer((request, response) => {
     if (request.url === '/images/generations') {
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ data: [{ b64_json: Buffer.from('image-bytes').toString('base64') }] }));
+      let body = '';
+      request.on('data', chunk => { body += chunk; });
+      request.on('end', () => {
+        const count = JSON.parse(body).n;
+        const data = Array.from({ length: count }, (_, index) => ({
+          b64_json: Buffer.from(index === 0 ? 'image-bytes' : 'second-image-bytes').toString('base64')
+        }));
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ data }));
+      });
       return;
     }
     if (request.url === '/images/edits') {
@@ -180,6 +189,7 @@ test('the Rust media engine generates OpenAI-compatible image and video requests
   }, async baseUrl => {
     const context = { provider: 'azure', apiKey: 'test', baseUrl };
     const image = await generateImage({ context, model: 'gpt-image-2', prompt: 'A blue square' });
+    const images = await generateImages({ context, model: 'gpt-image-2', prompt: 'Two blue squares', count: 2 });
     const tempDir = await mkdtemp(join(tmpdir(), 'lmx-image-test-'));
     const inputImage = join(tempDir, 'reference.png');
     await writeFile(inputImage, 'reference-image-bytes');
@@ -191,6 +201,7 @@ test('the Rust media engine generates OpenAI-compatible image and video requests
     });
     const video = await generateVideo({ context, model: 'sora-2', prompt: 'A blue square moving' });
     assert.equal(Buffer.from(image.content).toString(), 'image-bytes');
+    assert.deepEqual(images.images.map(image => Buffer.from(image.content).toString()), ['image-bytes', 'second-image-bytes']);
     assert.equal(Buffer.from(editedImage.content).toString(), 'edited-image-bytes');
     assert.equal(Buffer.from(video.content).toString(), 'video-bytes');
   });
@@ -205,6 +216,14 @@ test('streamImage yields partial and completed images for generation and edits',
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {
       requests.push({ url: request.url, body, contentType: request.headers['content-type'] });
+      if (request.url === '/images/generations' && JSON.parse(body).n > 1) {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({
+          data: ['first', 'second'].map(value => ({ b64_json: Buffer.from(value).toString('base64') })),
+          usage: { total_tokens: 24 }
+        }));
+        return;
+      }
       const prefix = request.url === '/images/edits' ? 'image_edit' : 'image_generation';
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.write(`event: ${prefix}.partial_image\n`);
@@ -225,10 +244,10 @@ test('streamImage yields partial and completed images for generation and edits',
     for await (const event of streamImage({
       context, model: 'gpt-image-2', prompt: 'A blue square', partialImages: 1
     })) generation.push(event);
-    assert.deepEqual(generation.map(event => event.type), ['partial', 'completed']);
+    assert.deepEqual(generation.map(event => event.type), ['partial', 'completed', 'batch_completed']);
     assert.equal(Buffer.from(generation[0].result.content).toString(), 'preview');
     assert.equal(Buffer.from(generation[1].result.content).toString(), 'final');
-    assert.equal(generation[1].usage?.total_tokens, 12);
+    assert.equal(generation[2].usage?.total_tokens, 12);
 
     const tempDir = await mkdtemp(join(tmpdir(), 'lmx-image-stream-test-'));
     const inputImage = join(tempDir, 'reference.png');
@@ -237,7 +256,18 @@ test('streamImage yields partial and completed images for generation and edits',
     for await (const event of streamImage({
       context, model: 'gpt-image-2', prompt: 'Turn it red', inputImages: [inputImage], partialImages: 3
     })) edit.push(event);
-    assert.deepEqual(edit.map(event => event.type), ['partial', 'completed']);
+    assert.deepEqual(edit.map(event => event.type), ['partial', 'completed', 'batch_completed']);
+
+    const batch = [];
+    for await (const event of streamImage({
+      context, model: 'gpt-image-2', prompt: 'Two blue squares', count: 2
+    })) batch.push(event);
+    assert.deepEqual(batch.map(event => event.type), ['completed', 'completed', 'batch_completed']);
+    assert.deepEqual(
+      batch.slice(0, 2).map(event => Buffer.from(event.result.content).toString()),
+      ['first', 'second'],
+    );
+    assert.equal(batch[2].usage?.total_tokens, 24);
   });
   assert.deepEqual(JSON.parse(requests[0].body), {
     model: 'gpt-image-2', prompt: 'A blue square', size: '1024x1024', n: 1,
@@ -246,6 +276,10 @@ test('streamImage yields partial and completed images for generation and edits',
   assert.match(requests[1].contentType, /^multipart\/form-data/);
   assert.match(requests[1].body, /name="stream"\r\n\r\ntrue/);
   assert.match(requests[1].body, /name="partial_images"\r\n\r\n3/);
+  assert.deepEqual(JSON.parse(requests[2].body), {
+    model: 'gpt-image-2', prompt: 'Two blue squares', size: '1024x1024', n: 2,
+    quality: 'high'
+  });
 });
 
 test('the registry reads configured model catalogs in the Rust core', () => {
