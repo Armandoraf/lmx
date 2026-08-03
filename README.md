@@ -17,12 +17,8 @@ tests/fixtures/        cross-language protocol fixtures
 
 `lmx-core` owns provider defaults, OpenAI-compatible request construction,
 HTTP/SSE transport, response-event normalization, tool-round state, and
-foreground-matting transparency processing. Python and TypeScript convert their public
+white-key transparency processing. Python and TypeScript convert their public
 values at the edge and delegate all of those decisions to Rust.
-
-The bundled MODNet foreground-matting model is from
-[Xenova/modnet](https://huggingface.co/Xenova/modnet) under Apache-2.0; see
-`crates/lmx-core/assets/NOTICE`.
 
 ## Core contract
 

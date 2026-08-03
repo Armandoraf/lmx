@@ -1,7 +1,0 @@
-MODNet foreground-matting model
-
-Source: https://huggingface.co/Xenova/modnet
-License: Apache-2.0
-Model export normalized for the bundled Rust runtime by replacing the ONNX
-Resize coordinate transformation mode `pytorch_half_pixel` with equivalent
-`half_pixel` behavior for this model's non-unit resize outputs.
