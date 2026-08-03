@@ -63,6 +63,7 @@ export type ToolCallStartedEvent = {
 export type ToolCallCompletedEvent = {
   type: 'tool_call_completed'; name: string; callId: string; result: unknown;
 };
+export type FailedEvent = { type: 'failed'; error: string };
 export type CompletedEvent = {
   type: 'completed'; provider: ProviderName; model: string; outputItems: ResponseItem[];
   outputText: string; toolRoundtrips: number;
@@ -72,6 +73,7 @@ export type ResponseEvent =
   | OutputItemEvent
   | ToolCallStartedEvent
   | ToolCallCompletedEvent
+  | FailedEvent
   | CompletedEvent;
 export type ResponseRequest = {
   input: ResponseItem[];
@@ -116,8 +118,20 @@ export const outputTextFromItems = (items: Record<string, unknown>[]): string =>
 export const buildWireRequest = (request: Record<string, unknown>): WireRequest =>
   JSON.parse(core.buildWireRequestJson(JSON.stringify(request))) as WireRequest;
 
+export type ImageJob = {
+  provider: string;
+  model: string;
+  prompt: string;
+  size: string;
+  width: number;
+  height: number;
+  mimeType: string;
+  background?: string;
+  backgroundProcessing?: string;
+};
+
 export type ImageResult = {
-  job: Record<string, unknown>;
+  job: ImageJob;
   content: Uint8Array;
   contentType: string;
 };
@@ -129,7 +143,7 @@ export const generateImage = async (request: Record<string, unknown>): Promise<I
     delete payload.provider;
   }
   const result = JSON.parse(await core.generateImageJson(JSON.stringify(payload))) as {
-    job: Record<string, unknown>;
+    job: ImageJob;
     contentBase64: string;
     contentType: string;
   };
@@ -249,7 +263,9 @@ export const respond = async (request: ResponseRequest): Promise<ResponseResult>
 };
 
 export async function structuredResponse<T>(request: ResponseRequest & {
-  textFormat: z.ZodType<T>;
+  textFormat: {
+    safeParse(value: unknown): { success: true; data: T } | { success: false };
+  };
   textFormatName?: string;
 }): Promise<T> {
   const { textFormat, textFormatName = 'structured_response', ...responseRequest } = request;
@@ -258,7 +274,7 @@ export async function structuredResponse<T>(request: ResponseRequest & {
     textFormat: {
       type: 'json_schema',
       name: textFormatName,
-      schema: z.toJSONSchema(textFormat),
+      schema: z.toJSONSchema(textFormat as z.ZodType),
       strict: true
     }
   };

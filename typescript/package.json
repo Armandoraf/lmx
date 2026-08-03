@@ -1,6 +1,6 @@
 {
   "name": "@armandoraf/lmx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript bindings for the LMX provider engine",
   "type": "module",
   "repository": {
@@ -38,18 +38,19 @@
       "aarch64-unknown-linux-gnu"
     ]
   },
-  "dependencies": {
-    "zod": "^4.4.3"
+  "peerDependencies": {
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.6.0",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
   },
   "optionalDependencies": {
-    "@armandoraf/lmx-darwin-arm64": "0.1.0",
-    "@armandoraf/lmx-darwin-x64": "0.1.0",
-    "@armandoraf/lmx-linux-x64-gnu": "0.1.0",
-    "@armandoraf/lmx-linux-arm64-gnu": "0.1.0"
+    "@armandoraf/lmx-darwin-arm64": "0.1.1",
+    "@armandoraf/lmx-darwin-x64": "0.1.1",
+    "@armandoraf/lmx-linux-x64-gnu": "0.1.1",
+    "@armandoraf/lmx-linux-arm64-gnu": "0.1.1"
   }
 }
