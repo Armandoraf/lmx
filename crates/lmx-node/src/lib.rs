@@ -32,6 +32,15 @@ pub fn provider_registry_json() -> Result<String> {
 }
 
 #[napi]
+pub async fn discover_provider_registry_json() -> Result<String> {
+    Ok(ProviderRegistry::discover()
+        .await
+        .map_err(napi_error)?
+        .as_json()
+        .to_string())
+}
+
+#[napi]
 pub fn load_request_context_json(provider_json: String) -> Result<String> {
     let provider = serde_json::from_str(&provider_json).map_err(napi_error)?;
     serde_json::to_string(&load_request_context(provider).map_err(napi_error)?).map_err(napi_error)

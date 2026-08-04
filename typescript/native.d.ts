@@ -19,6 +19,8 @@ export declare function buildMessageItemJson(role: string, text: string): string
 
 export declare function buildWireRequestJson(requestJson: string): string
 
+export declare function discoverProviderRegistryJson(): Promise<string>
+
 export declare function generateImageJson(requestJson: string): Promise<string>
 
 export declare function generateImagesJson(requestJson: string): Promise<string>

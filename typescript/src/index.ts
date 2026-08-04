@@ -7,6 +7,7 @@ import * as native from '../native.js';
 type Native = {
   version(): string;
   providerRegistryJson(): string;
+  discoverProviderRegistryJson(): Promise<string>;
   loadRequestContextJson(provider: string): string;
   buildMessageItemJson(role: string, text: string): string;
   outputTextFromItemsJson(items: string): string;
@@ -107,6 +108,10 @@ export type ResponseRequest = {
 
 export const providerRegistry = (): ProviderSpec[] =>
   JSON.parse(core.providerRegistryJson()) as ProviderSpec[];
+
+/** Resolve account-visible provider models and cache them in the native engine. */
+export const discoverProviderRegistry = async (): Promise<ProviderSpec[]> =>
+  JSON.parse(await core.discoverProviderRegistryJson()) as ProviderSpec[];
 
 export const availableProviders = (): ProviderName[] =>
   providerRegistry().map(({ provider }) => provider);
