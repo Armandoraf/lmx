@@ -182,9 +182,6 @@ impl ProviderRegistry {
         if std::env::var_os("NANOGPT_API_KEY").is_some() {
             registry.replace_models(Provider::Nanogpt, discover_nanogpt_models().await?)?;
         }
-        if std::env::var_os("AZURE_OPENAI_ENDPOINT").is_some() {
-            registry.replace_models(Provider::Azure, discover_azure_deployments().await?)?;
-        }
         *DISCOVERED_REGISTRY
             .get_or_init(|| Mutex::new(None))
             .lock()
@@ -402,107 +399,6 @@ fn version_key(model: &str) -> Vec<u32> {
         .filter(|part| !part.is_empty())
         .filter_map(|part| part.parse().ok())
         .collect()
-}
-
-#[derive(Deserialize)]
-struct AzureDeploymentList {
-    value: Vec<AzureDeployment>,
-}
-
-#[derive(Deserialize)]
-struct AzureDeployment {
-    name: String,
-    #[serde(default)]
-    properties: AzureDeploymentProperties,
-}
-
-#[derive(Default, Deserialize)]
-struct AzureDeploymentProperties {
-    #[serde(default)]
-    model: AzureDeploymentModel,
-}
-
-#[derive(Default, Deserialize)]
-struct AzureDeploymentModel {
-    #[serde(default)]
-    name: String,
-}
-
-async fn discover_azure_deployments() -> Result<Vec<String>> {
-    let subscription = required_env("AZURE_OPENAI_SUBSCRIPTION_ID")?;
-    let resource_group = required_env("AZURE_OPENAI_RESOURCE_GROUP")?;
-    let account = required_env("AZURE_OPENAI_ACCOUNT_NAME")?;
-    let token = azure_management_token()?;
-    let url = format!(
-        "https://management.azure.com/subscriptions/{subscription}/resourceGroups/{resource_group}/providers/Microsoft.CognitiveServices/accounts/{account}/deployments?api-version=2025-06-01"
-    );
-    let deployments = reqwest::Client::new()
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<AzureDeploymentList>()
-        .await?;
-    let language_deployments = deployments
-        .value
-        .into_iter()
-        .filter(|deployment| {
-            let model = deployment.properties.model.name.to_ascii_lowercase();
-            !model.starts_with("gpt-image")
-                && !model.starts_with("sora")
-                && !model.starts_with("dall-e")
-        })
-        .map(|deployment| deployment.name)
-        .collect::<Vec<_>>();
-    if language_deployments.is_empty() {
-        return Err(Error::State(
-            "Azure returned no language-model deployments".into(),
-        ));
-    }
-    Ok(language_deployments)
-}
-
-fn required_env(name: &str) -> Result<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| Error::State(format!("{name} is required for Azure model discovery")))
-}
-
-fn azure_management_token() -> Result<String> {
-    if let Ok(token) = required_env("AZURE_OPENAI_MANAGEMENT_TOKEN") {
-        return Ok(token);
-    }
-    let output = std::process::Command::new("az")
-        .args([
-            "account",
-            "get-access-token",
-            "--resource",
-            "https://management.azure.com",
-            "--query",
-            "accessToken",
-            "--output",
-            "tsv",
-        ])
-        .output()
-        .map_err(|error| {
-            Error::State(format!(
-                "AZURE_OPENAI_MANAGEMENT_TOKEN is required when Azure CLI access is unavailable: {error}"
-            ))
-        })?;
-    if !output.status.success() {
-        return Err(Error::State(
-            "Azure CLI could not obtain an Azure Resource Manager access token".into(),
-        ));
-    }
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if token.is_empty() {
-        return Err(Error::State(
-            "Azure CLI returned an empty Azure Resource Manager access token".into(),
-        ));
-    }
-    Ok(token)
 }
 
 fn models_from_environment(name: &str, fallback: Vec<String>) -> Result<Vec<String>> {
