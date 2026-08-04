@@ -432,7 +432,7 @@ async fn discover_azure_deployments() -> Result<Vec<String>> {
     let subscription = required_env("AZURE_OPENAI_SUBSCRIPTION_ID")?;
     let resource_group = required_env("AZURE_OPENAI_RESOURCE_GROUP")?;
     let account = required_env("AZURE_OPENAI_ACCOUNT_NAME")?;
-    let token = required_env("AZURE_OPENAI_MANAGEMENT_TOKEN")?;
+    let token = azure_management_token()?;
     let url = format!(
         "https://management.azure.com/subscriptions/{subscription}/resourceGroups/{resource_group}/providers/Microsoft.CognitiveServices/accounts/{account}/deployments?api-version=2025-06-01"
     );
@@ -468,6 +468,41 @@ fn required_env(name: &str) -> Result<String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| Error::State(format!("{name} is required for Azure model discovery")))
+}
+
+fn azure_management_token() -> Result<String> {
+    if let Ok(token) = required_env("AZURE_OPENAI_MANAGEMENT_TOKEN") {
+        return Ok(token);
+    }
+    let output = std::process::Command::new("az")
+        .args([
+            "account",
+            "get-access-token",
+            "--resource",
+            "https://management.azure.com",
+            "--query",
+            "accessToken",
+            "--output",
+            "tsv",
+        ])
+        .output()
+        .map_err(|error| {
+            Error::State(format!(
+                "AZURE_OPENAI_MANAGEMENT_TOKEN is required when Azure CLI access is unavailable: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(Error::State(
+            "Azure CLI could not obtain an Azure Resource Manager access token".into(),
+        ));
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if token.is_empty() {
+        return Err(Error::State(
+            "Azure CLI returned an empty Azure Resource Manager access token".into(),
+        ));
+    }
+    Ok(token)
 }
 
 fn models_from_environment(name: &str, fallback: Vec<String>) -> Result<Vec<String>> {
