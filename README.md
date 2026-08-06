@@ -26,7 +26,7 @@ OpenAI API with an API key for OpenAI requests.
 Python 3.11+:
 
 ```sh
-pip install lmx
+pip install lmx-sdk
 ```
 
 Node.js 18+:

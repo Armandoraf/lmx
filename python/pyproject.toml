@@ -3,7 +3,7 @@ requires = ["maturin>=1.9,<2"]
 build-backend = "maturin"
 
 [project]
-name = "lmx"
+name = "lmx-sdk"
 version = "0.2.0"
 description = "Unified Python client for documented LLM provider APIs"
 requires-python = ">=3.11"
