@@ -13,7 +13,7 @@ mod response;
 mod transport;
 mod video;
 
-pub use auth::{load_request_context, normalize_azure_endpoint, refresh_codex_auth};
+pub use auth::{load_request_context, normalize_azure_endpoint};
 pub use endpoint::endpoint_url;
 pub use error::{Error, Result};
 pub use images::{

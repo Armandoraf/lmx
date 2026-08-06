@@ -11,21 +11,17 @@ use crate::{Error, Result};
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
-    Codex,
     Openai,
     Nanogpt,
     Azure,
-    Bedrock,
 }
 
 impl Provider {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Codex => "codex",
             Self::Openai => "openai",
             Self::Nanogpt => "nanogpt",
             Self::Azure => "azure",
-            Self::Bedrock => "bedrock",
         }
     }
 }
@@ -85,18 +81,12 @@ impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::with_models(
             vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
-            vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
             vec![
                 "moonshotai/kimi-k2.6".into(),
                 "zai-org/glm-5.1".into(),
                 "deepseek/deepseek-v3.2".into(),
             ],
             vec!["gpt-5-mini".into(), "gpt-5-nano".into(), "gpt-5.5".into()],
-            vec![
-                "us.anthropic.claude-sonnet-4-6".into(),
-                "us.anthropic.claude-opus-4-7".into(),
-                "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
-            ],
         )
     }
 }
@@ -115,10 +105,6 @@ impl ProviderRegistry {
     }
 
     fn from_environment_uncached() -> Result<Self> {
-        let codex_models = models_from_environment(
-            "CODEX_MODELS",
-            vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
-        )?;
         let openai_models = models_from_environment(
             "OPENAI_MODELS",
             vec![
@@ -146,23 +132,10 @@ impl ProviderRegistry {
                 "gpt-5.5".into(),
             ],
         )?;
-        let bedrock_default = std::env::var("BEDROCK_MODEL")
-            .unwrap_or_else(|_| "us.anthropic.claude-sonnet-4-6".into());
-        let bedrock_models = models_from_environment(
-            "BEDROCK_MODELS",
-            vec![
-                bedrock_default,
-                "us.anthropic.claude-sonnet-4-6".into(),
-                "us.anthropic.claude-opus-4-7".into(),
-                "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
-            ],
-        )?;
         Ok(Self::with_models(
-            codex_models,
             openai_models,
             nanogpt_models,
             azure_models,
-            bedrock_models,
         ))
     }
 
@@ -207,11 +180,9 @@ impl ProviderRegistry {
     }
 
     fn with_models(
-        codex_models: Vec<String>,
         openai_models: Vec<String>,
         nanogpt_models: Vec<String>,
         azure_models: Vec<String>,
-        bedrock_models: Vec<String>,
     ) -> Self {
         let capabilities = ProviderCapabilities {
             supports_tools: true,
@@ -222,16 +193,6 @@ impl ProviderRegistry {
             supports_reasoning: true,
         };
         let mut specs = BTreeMap::new();
-        specs.insert(
-            Provider::Codex,
-            ProviderSpec {
-                provider: Provider::Codex,
-                default_model: codex_models[0].clone(),
-                available_models: codex_models,
-                base_url: Some("https://chatgpt.com/backend-api/codex".into()),
-                capabilities: capabilities.clone(),
-            },
-        );
         specs.insert(
             Provider::Openai,
             ProviderSpec {
@@ -260,23 +221,6 @@ impl ProviderRegistry {
                 available_models: azure_models,
                 base_url: None,
                 capabilities,
-            },
-        );
-        specs.insert(
-            Provider::Bedrock,
-            ProviderSpec {
-                provider: Provider::Bedrock,
-                default_model: bedrock_models[0].clone(),
-                available_models: bedrock_models,
-                base_url: None,
-                capabilities: ProviderCapabilities {
-                    supports_tools: true,
-                    supports_structured_output: false,
-                    supports_streaming: true,
-                    supports_images: true,
-                    supports_pdf: false,
-                    supports_reasoning: false,
-                },
             },
         );
         Self { specs }

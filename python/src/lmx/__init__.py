@@ -45,7 +45,7 @@ def provider_registry() -> list[dict[str, Any]]:
 
 
 def load_request_context(provider: str) -> dict[str, Any]:
-    """Load environment or Codex OAuth credentials in the Rust core."""
+    """Load documented provider credentials from the environment in the Rust core."""
     return json.loads(load_request_context_json(json.dumps(provider)))
 
 

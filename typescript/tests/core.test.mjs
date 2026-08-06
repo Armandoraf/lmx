@@ -20,7 +20,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.1.17');
+  assert.equal(version(), '0.2.0');
 });
 
 async function withServer(handler, run) {
@@ -283,15 +283,15 @@ test('streamImage yields partial and completed images for generation and edits',
 });
 
 test('the registry reads configured model catalogs in the Rust core', () => {
-  const previous = process.env.CODEX_MODELS;
-  process.env.CODEX_MODELS = 'gpt-5.6-terra,gpt-5.5';
+  const previous = process.env.OPENAI_MODELS;
+  process.env.OPENAI_MODELS = 'gpt-5.6-terra,gpt-5.5';
   try {
-    assert.equal(defaultModelForProvider('codex'), 'gpt-5.6-terra');
-    assert.deepEqual(availableModelsForProvider('codex'), ['gpt-5.6-terra', 'gpt-5.5']);
-    assert.equal(getProvider('codex').capabilities.supportsStructuredOutput, true);
+    assert.equal(defaultModelForProvider('openai'), 'gpt-5.6-terra');
+    assert.deepEqual(availableModelsForProvider('openai'), ['gpt-5.6-terra', 'gpt-5.5']);
+    assert.equal(getProvider('openai').capabilities.supportsStructuredOutput, true);
   } finally {
-    if (previous === undefined) delete process.env.CODEX_MODELS;
-    else process.env.CODEX_MODELS = previous;
+    if (previous === undefined) delete process.env.OPENAI_MODELS;
+    else process.env.OPENAI_MODELS = previous;
   }
 });
 

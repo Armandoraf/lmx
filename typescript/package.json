@@ -1,7 +1,7 @@
 {
   "name": "@armandoraf/lmx",
-  "version": "0.1.17",
-  "description": "TypeScript bindings for the LMX provider engine",
+  "version": "0.2.0",
+  "description": "Unified TypeScript client for documented LLM provider APIs",
   "type": "module",
   "repository": {
     "type": "git",
@@ -9,8 +9,7 @@
     "directory": "typescript"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "restricted"
+    "access": "public"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -25,7 +24,7 @@
     "prepare": "npm run build",
     "prepack": "npm run build",
     "release:artifacts": "napi create-npm-dirs --npm-dir npm && napi artifacts --output-dir artifacts --npm-dir npm",
-    "release:platforms": "NPM_CONFIG_USERCONFIG=$PWD/.npmrc npm_config_registry=https://npm.pkg.github.com napi prepublish --no-gh-release --npm-dir npm",
+    "release:platforms": "napi prepublish --no-gh-release --npm-dir npm",
     "test": "npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -41,6 +40,17 @@
   "peerDependencies": {
     "zod": "^4.0.0"
   },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "keywords": [
+    "ai",
+    "llm",
+    "openai",
+    "streaming",
+    "tool-calling"
+  ],
   "devDependencies": {
     "@napi-rs/cli": "^3.6.0",
     "@types/node": "^24.0.0",
@@ -48,9 +58,9 @@
     "zod": "^4.4.3"
   },
   "optionalDependencies": {
-    "@armandoraf/lmx-darwin-arm64": "0.1.17",
-    "@armandoraf/lmx-darwin-x64": "0.1.17",
-    "@armandoraf/lmx-linux-x64-gnu": "0.1.17",
-    "@armandoraf/lmx-linux-arm64-gnu": "0.1.17"
+    "@armandoraf/lmx-darwin-arm64": "0.2.0",
+    "@armandoraf/lmx-darwin-x64": "0.2.0",
+    "@armandoraf/lmx-linux-x64-gnu": "0.2.0",
+    "@armandoraf/lmx-linux-arm64-gnu": "0.2.0"
   }
 }

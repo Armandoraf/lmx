@@ -27,11 +27,6 @@ pub fn build_message_item(role: &str, text: &str) -> Result<ResponseItem> {
 pub struct ResponseRequest {
     pub input: Vec<ResponseItem>,
     pub context: RequestContext,
-    /// Whether a Codex 401 may refresh the process-level auth cache. Hosts that
-    /// provide request-scoped credentials must leave this disabled so another
-    /// account can never be substituted into the active request.
-    #[serde(default)]
-    pub refresh_codex_auth: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default)]
@@ -266,18 +261,6 @@ impl ResponseMachine {
         })
     }
 
-    pub(crate) fn is_codex(&self) -> bool {
-        self.request.context.provider == crate::Provider::Codex
-    }
-
-    pub(crate) fn replace_context(&mut self, context: RequestContext) {
-        self.base_url = context
-            .base_url
-            .clone()
-            .unwrap_or_else(|| self.base_url.clone());
-        self.request.context = context;
-    }
-
     fn begin_round(&mut self) -> Result<()> {
         if self.completed {
             return Err(Error::State("response is already complete".into()));
@@ -423,24 +406,7 @@ where
 {
     let transport = crate::OpenAiTransport::new();
     machine.begin_round()?;
-    match stream_and_observe(&transport, machine, cancellation, &mut observer).await {
-        Ok(()) => {}
-        Err(crate::Error::HttpStatus { status: 401, .. })
-            if machine.is_codex() && machine.request.refresh_codex_auth =>
-        {
-            if cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let refreshed = tokio::select! {
-                _ = cancellation.cancelled() => return Err(Error::Cancelled),
-                refreshed = crate::refresh_codex_auth() => refreshed?,
-            };
-            machine.replace_context(refreshed);
-            machine.begin_round()?;
-            stream_and_observe(&transport, machine, cancellation, &mut observer).await?;
-        }
-        Err(error) => return Err(error),
-    }
+    stream_and_observe(&transport, machine, cancellation, &mut observer).await?;
     machine.finish_round()
 }
 
