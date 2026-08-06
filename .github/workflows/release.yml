@@ -93,8 +93,6 @@ jobs:
           merge-multiple: true
       - run: npm run release:artifacts && npm run release:platforms && npm publish --access public
         working-directory: typescript
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
           name: python-distributions
