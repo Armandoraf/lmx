@@ -20,7 +20,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.1.12');
+  assert.equal(version(), '0.1.17');
 });
 
 async function withServer(handler, run) {

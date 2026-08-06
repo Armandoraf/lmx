@@ -32,7 +32,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.1.16';
+const packageVersion = '0.1.17';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -96,6 +96,8 @@ export type ResponseEvent =
 export type ResponseRequest = {
   input: ResponseItem[];
   context?: Record<string, unknown>;
+  /** Enable only for the implicit process-level Codex auth cache. */
+  refreshCodexAuth?: boolean;
   provider?: ProviderName;
   model?: string;
   instructions?: string;
@@ -319,6 +321,7 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
   const { toolHandlers = {}, signal, ...payload } = request;
   if (!payload.context && typeof payload.provider === 'string') {
     payload.context = loadRequestContext(payload.provider);
+    if (payload.provider === 'codex') payload.refreshCodexAuth = true;
     delete payload.provider;
   }
   const session = new core.ResponseSession(JSON.stringify(payload));

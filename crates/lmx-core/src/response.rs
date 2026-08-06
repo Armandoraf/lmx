@@ -27,6 +27,11 @@ pub fn build_message_item(role: &str, text: &str) -> Result<ResponseItem> {
 pub struct ResponseRequest {
     pub input: Vec<ResponseItem>,
     pub context: RequestContext,
+    /// Whether a Codex 401 may refresh the process-level auth cache. Hosts that
+    /// provide request-scoped credentials must leave this disabled so another
+    /// account can never be substituted into the active request.
+    #[serde(default)]
+    pub refresh_codex_auth: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default)]
@@ -420,7 +425,9 @@ where
     machine.begin_round()?;
     match stream_and_observe(&transport, machine, cancellation, &mut observer).await {
         Ok(()) => {}
-        Err(crate::Error::HttpStatus { status: 401, .. }) if machine.is_codex() => {
+        Err(crate::Error::HttpStatus { status: 401, .. })
+            if machine.is_codex() && machine.request.refresh_codex_auth =>
+        {
             if cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
