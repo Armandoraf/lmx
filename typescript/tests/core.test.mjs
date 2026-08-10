@@ -22,7 +22,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.2.1');
+  assert.equal(version(), '0.2.2');
 });
 
 async function withServer(handler, run) {

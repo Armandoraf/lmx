@@ -271,6 +271,7 @@ impl ResponseSession {
                 &cancellation,
                 |event| {
                     let _ = sender.send(ResponseFrame::Event { event });
+                    Ok(())
                 },
             ));
             if let Ok(mut slot) = machine_slot.lock() {

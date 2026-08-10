@@ -32,7 +32,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.2.1';
+const packageVersion = '0.2.2';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -90,6 +90,9 @@ export type ToolResult =
 export type ToolHandler = (arguments_: Record<string, unknown>) => ToolResult | Promise<ToolResult>;
 export type TextDeltaEvent = { type: 'text_delta'; delta: string };
 export type OutputItemEvent = { type: 'output_item'; outputIndex: number; item: ResponseItem };
+export type ImageGenerationPartialEvent = {
+  type: 'image_generation_partial'; partialImageIndex: number; partialImageBase64: string;
+};
 export type ToolCallStartedEvent = {
   type: 'tool_call_started'; name: string; callId: string; arguments: Record<string, unknown>;
 };
@@ -104,6 +107,7 @@ export type CompletedEvent = {
 export type ResponseEvent =
   | TextDeltaEvent
   | OutputItemEvent
+  | ImageGenerationPartialEvent
   | ToolCallStartedEvent
   | ToolCallCompletedEvent
   | FailedEvent
@@ -115,6 +119,7 @@ export type ResponseRequest = {
   model?: string;
   instructions?: string;
   tools?: ResponseItem[];
+  toolChoice?: unknown;
   toolHandlers?: Record<string, ToolHandler>;
   reasoningEffort?: string;
   textVerbosity?: string;

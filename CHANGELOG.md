@@ -2,6 +2,12 @@
 
 All notable changes to LMX are documented here.
 
+## [0.2.2] - 2026-08-10
+
+- Added Codex-backed image generation and editing through the direct Responses
+  transport, including streamed partial-image previews.
+- Fixed the release workflow's Linux ARM native-build target installation.
+
 ## [0.2.1] - 2026-08-10
 
 - Added a direct Codex Responses provider for host-managed, request-scoped

@@ -34,6 +34,8 @@ pub struct ResponseRequest {
     #[serde(default)]
     pub tools: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default = "default_verbosity")]
     pub text_verbosity: String,
@@ -63,6 +65,10 @@ pub enum CoreEvent {
     OutputItem {
         output_index: usize,
         item: ResponseItem,
+    },
+    ImageGenerationPartial {
+        partial_image_index: u8,
+        partial_image_base64: String,
     },
     ToolCallStarted {
         name: String,
@@ -244,7 +250,7 @@ impl ResponseMachine {
             "instructions": self.request.instructions,
             "input": self.running_input.iter().map(openai_input_item).collect::<Vec<_>>(),
             "tools": self.request.tools,
-            "tool_choice": "auto",
+            "tool_choice": self.request.tool_choice.clone().unwrap_or_else(|| json!("auto")),
             "parallel_tool_calls": false,
             "store": false,
             "include": ["reasoning.encrypted_content"],
@@ -260,6 +266,10 @@ impl ResponseMachine {
             headers,
             body,
         })
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     fn begin_round(&mut self) -> Result<()> {
@@ -302,6 +312,34 @@ impl ResponseMachine {
                     })?;
                 self.round_items.insert(output_index, item.clone());
                 Ok(vec![CoreEvent::OutputItem { output_index, item }])
+            }
+            "response.image_generation_call.partial_image" => {
+                let partial_image_index = event
+                    .get("partial_image_index")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        Error::Event(
+                            "image generation partial event did not include partial_image_index"
+                                .into(),
+                        )
+                    })?
+                    .try_into()
+                    .map_err(|_| Error::Event("partial image index exceeds u8".into()))?;
+                let partial_image_base64 = event
+                    .get("partial_image_b64")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        Error::Event(
+                            "image generation partial event did not include partial_image_b64"
+                                .into(),
+                        )
+                    })?
+                    .to_owned();
+                Ok(vec![CoreEvent::ImageGenerationPartial {
+                    partial_image_index,
+                    partial_image_base64,
+                }])
             }
             "response.completed" => {
                 self.round_completed = true;
@@ -418,8 +456,11 @@ pub async fn execute_round_with_cancellation(
     cancellation: &CancellationToken,
 ) -> Result<RoundResult> {
     let mut events = Vec::new();
-    let next =
-        execute_round_with_observer(machine, cancellation, |event| events.push(event)).await?;
+    let next = execute_round_with_observer(machine, cancellation, |event| {
+        events.push(event);
+        Ok(())
+    })
+    .await?;
     Ok(RoundResult { events, next })
 }
 
@@ -432,7 +473,7 @@ pub async fn execute_round_with_observer<F>(
     mut observer: F,
 ) -> Result<NextAction>
 where
-    F: FnMut(CoreEvent),
+    F: FnMut(CoreEvent) -> Result<()>,
 {
     let transport = crate::OpenAiTransport::new();
     machine.begin_round()?;
@@ -447,13 +488,13 @@ async fn stream_and_observe<F>(
     observer: &mut F,
 ) -> Result<()>
 where
-    F: FnMut(CoreEvent),
+    F: FnMut(CoreEvent) -> Result<()>,
 {
     let wire = machine.wire_request()?;
     transport
         .stream_round(wire, cancellation, |raw| {
             for event in machine.ingest(&raw)? {
-                observer(event);
+                observer(event)?;
             }
             Ok(())
         })
@@ -599,6 +640,7 @@ mod tests {
             model: Some("gpt-5.6-sol".into()),
             instructions: String::new(),
             tools: vec![],
+            tool_choice: None,
             reasoning_effort: None,
             text_verbosity: "low".into(),
             text_format: None,
@@ -610,6 +652,37 @@ mod tests {
         assert_eq!(wire.url, "https://chatgpt.com/backend-api/codex/responses");
         assert_eq!(wire.headers["Authorization"], "Bearer request-token");
         assert_eq!(wire.headers["ChatGPT-Account-ID"], "account-123");
+    }
+
+    #[test]
+    fn preserves_an_explicit_tool_choice() {
+        let mut request = request();
+        request.tools = vec![json!({"type": "image_generation", "action": "generate"})];
+        request.tool_choice = Some(json!("required"));
+        let wire = ResponseMachine::new(&ProviderRegistry::default(), request)
+            .unwrap()
+            .wire_request()
+            .unwrap();
+        assert_eq!(wire.body["tool_choice"], "required");
+    }
+
+    #[test]
+    fn emits_image_generation_partials() {
+        let mut machine = ResponseMachine::new(&ProviderRegistry::default(), request()).unwrap();
+        let events = machine
+            .ingest(&json!({
+                "type": "response.image_generation_call.partial_image",
+                "partial_image_index": 2,
+                "partial_image_b64": "cHJldmlldw==",
+            }))
+            .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [CoreEvent::ImageGenerationPartial {
+                partial_image_index: 2,
+                partial_image_base64,
+            }] if partial_image_base64 == "cHJldmlldw=="
+        ));
     }
 
     #[test]
