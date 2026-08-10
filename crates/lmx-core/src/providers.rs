@@ -11,6 +11,7 @@ use crate::{Error, Result};
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
+    Codex,
     Openai,
     Nanogpt,
     Azure,
@@ -19,6 +20,7 @@ pub enum Provider {
 impl Provider {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Codex => "codex",
             Self::Openai => "openai",
             Self::Nanogpt => "nanogpt",
             Self::Azure => "azure",
@@ -80,6 +82,11 @@ static DISCOVERED_REGISTRY: OnceLock<Mutex<Option<(Instant, ProviderRegistry)>>>
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::with_models(
+            vec![
+                "gpt-5.6-sol".into(),
+                "gpt-5.6-terra".into(),
+                "gpt-5.6-luna".into(),
+            ],
             vec!["gpt-5.5".into(), "gpt-5.5-mini".into()],
             vec![
                 "moonshotai/kimi-k2.6".into(),
@@ -105,6 +112,14 @@ impl ProviderRegistry {
     }
 
     fn from_environment_uncached() -> Result<Self> {
+        let codex_models = models_from_environment(
+            "CODEX_MODELS",
+            vec![
+                "gpt-5.6-sol".into(),
+                "gpt-5.6-terra".into(),
+                "gpt-5.6-luna".into(),
+            ],
+        )?;
         let openai_models = models_from_environment(
             "OPENAI_MODELS",
             vec![
@@ -133,6 +148,7 @@ impl ProviderRegistry {
             ],
         )?;
         Ok(Self::with_models(
+            codex_models,
             openai_models,
             nanogpt_models,
             azure_models,
@@ -180,6 +196,7 @@ impl ProviderRegistry {
     }
 
     fn with_models(
+        codex_models: Vec<String>,
         openai_models: Vec<String>,
         nanogpt_models: Vec<String>,
         azure_models: Vec<String>,
@@ -193,6 +210,16 @@ impl ProviderRegistry {
             supports_reasoning: true,
         };
         let mut specs = BTreeMap::new();
+        specs.insert(
+            Provider::Codex,
+            ProviderSpec {
+                provider: Provider::Codex,
+                default_model: codex_models[0].clone(),
+                available_models: codex_models,
+                base_url: Some("https://chatgpt.com/backend-api/codex".into()),
+                capabilities: capabilities.clone(),
+            },
+        );
         specs.insert(
             Provider::Openai,
             ProviderSpec {

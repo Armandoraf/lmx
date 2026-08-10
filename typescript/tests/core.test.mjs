@@ -8,11 +8,13 @@ import { z } from 'zod';
 
 import {
   availableModelsForProvider,
+  buildWireRequest,
   defaultModelForProvider,
   generateImage,
   generateImages,
   generateVideo,
   getProvider,
+  loadRequestContext,
   streamImage,
   streamResponse,
   structuredResponse,
@@ -20,7 +22,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.2.0');
+  assert.equal(version(), '0.2.1');
 });
 
 async function withServer(handler, run) {
@@ -293,6 +295,26 @@ test('the registry reads configured model catalogs in the Rust core', () => {
     if (previous === undefined) delete process.env.OPENAI_MODELS;
     else process.env.OPENAI_MODELS = previous;
   }
+});
+
+test('Codex uses caller-supplied request-scoped credentials only', () => {
+  assert.equal(defaultModelForProvider('codex'), 'gpt-5.6-sol');
+  const wire = buildWireRequest({
+    context: {
+      provider: 'codex',
+      apiKey: 'request-token',
+      headers: { 'ChatGPT-Account-ID': 'account-123' },
+    },
+    model: 'gpt-5.6-sol',
+    input: [{ type: 'message', role: 'user', content: 'Hello' }],
+  });
+  assert.equal(wire.url, 'https://chatgpt.com/backend-api/codex/responses');
+  assert.equal(wire.headers.Authorization, 'Bearer request-token');
+  assert.equal(wire.headers['ChatGPT-Account-ID'], 'account-123');
+  assert.throws(
+    () => loadRequestContext('codex'),
+    /requires a request-scoped context/,
+  );
 });
 
 test('the Effigy structured-output contract sends a JSON schema from Zod', async () => {

@@ -180,6 +180,7 @@ pub struct ResponseMachine {
 impl ResponseMachine {
     pub fn new(registry: &ProviderRegistry, request: ResponseRequest) -> Result<Self> {
         let spec = registry.get(&request.context.provider)?;
+        validate_request_context(&request.context)?;
         let model = request
             .model
             .clone()
@@ -374,6 +375,35 @@ impl ResponseMachine {
     }
 }
 
+fn validate_request_context(context: &RequestContext) -> Result<()> {
+    if context.provider != crate::Provider::Codex {
+        return Ok(());
+    }
+    if context.api_key.trim().is_empty() {
+        return Err(Error::State(
+            "provider 'codex' requires a non-empty request-scoped access token".into(),
+        ));
+    }
+    if context
+        .headers
+        .get("ChatGPT-Account-ID")
+        .is_none_or(|account_id| account_id.trim().is_empty())
+    {
+        return Err(Error::State(
+            "provider 'codex' requires a non-empty ChatGPT-Account-ID header in its request-scoped context".into(),
+        ));
+    }
+    if let Some(base_url) = &context.base_url
+        && base_url.trim_end_matches('/') != "https://chatgpt.com/backend-api/codex"
+    {
+        return Err(Error::State(
+            "provider 'codex' only permits the https://chatgpt.com/backend-api/codex base URL"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Execute one provider round. The caller may execute returned tool calls in
 /// its host language, submit their outputs, and invoke this again; all request
 /// construction and state transitions remain in this core.
@@ -553,6 +583,45 @@ mod tests {
         assert_eq!(wire.body["input"][0]["content"], "Hello");
         assert_eq!(wire.body["instructions"], "Answer concisely.");
         assert!(wire.body["stream"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn builds_a_direct_codex_request_from_request_scoped_credentials() {
+        let request = ResponseRequest {
+            input: vec![build_message_item("user", "Hello").unwrap()],
+            context: RequestContext {
+                provider: crate::Provider::Codex,
+                api_key: "request-token".into(),
+                base_url: None,
+                headers: BTreeMap::from([("ChatGPT-Account-ID".into(), "account-123".into())]),
+                query: BTreeMap::new(),
+            },
+            model: Some("gpt-5.6-sol".into()),
+            instructions: String::new(),
+            tools: vec![],
+            reasoning_effort: None,
+            text_verbosity: "low".into(),
+            text_format: None,
+        };
+        let wire = ResponseMachine::new(&ProviderRegistry::default(), request)
+            .unwrap()
+            .wire_request()
+            .unwrap();
+        assert_eq!(wire.url, "https://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(wire.headers["Authorization"], "Bearer request-token");
+        assert_eq!(wire.headers["ChatGPT-Account-ID"], "account-123");
+    }
+
+    #[test]
+    fn rejects_codex_context_without_an_account_header() {
+        let mut request = request();
+        request.context.provider = crate::Provider::Codex;
+        request.context.api_key = "request-token".into();
+        request.context.headers.clear();
+        assert!(matches!(
+            ResponseMachine::new(&ProviderRegistry::default(), request),
+            Err(Error::State(message)) if message.contains("ChatGPT-Account-ID")
+        ));
     }
 
     #[test]
