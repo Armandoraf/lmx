@@ -1,6 +1,6 @@
 {
   "name": "@armandoraf/lmx",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Unified TypeScript client for documented LLM provider APIs",
   "type": "module",
   "repository": {
@@ -61,9 +61,9 @@
     "zod": "^4.4.3"
   },
   "optionalDependencies": {
-    "@armandoraf/lmx-darwin-arm64": "0.2.2",
-    "@armandoraf/lmx-darwin-x64": "0.2.2",
-    "@armandoraf/lmx-linux-arm64-gnu": "0.2.2",
-    "@armandoraf/lmx-linux-x64-gnu": "0.2.2"
+    "@armandoraf/lmx-darwin-arm64": "0.2.3",
+    "@armandoraf/lmx-darwin-x64": "0.2.3",
+    "@armandoraf/lmx-linux-arm64-gnu": "0.2.3",
+    "@armandoraf/lmx-linux-x64-gnu": "0.2.3"
   }
 }

@@ -2,6 +2,12 @@
 
 All notable changes to LMX are documented here.
 
+## [0.2.3] - 2026-08-10
+
+- Fixed Codex image generation and editing to use the direct ChatGPT OAuth
+  Images API, matching Codex's built-in image extension.
+- Build the Linux ARM native package on a native ARM runner.
+
 ## [0.2.2] - 2026-08-10
 
 - Added Codex-backed image generation and editing through the direct Responses

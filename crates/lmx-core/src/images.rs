@@ -1,4 +1,8 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use eventsource_stream::Eventsource;
@@ -8,9 +12,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    CoreEvent, Error, NextAction, Provider, ProviderRegistry, RequestContext, ResponseMachine,
-    ResponseRequest, Result, endpoint_url, execute_round, execute_round_with_observer,
-    prompt_for_white_key, remove_white_key_background,
+    Error, Provider, RequestContext, Result, endpoint_url, prompt_for_white_key,
+    remove_white_key_background,
 };
 
 const OPENAI_SIZES: &[&str] = &["1024x1024", "1536x1024", "1024x1536"];
@@ -19,6 +22,10 @@ const GPT_IMAGE_2_MAX_EDGE: u32 = 3_840;
 const GPT_IMAGE_2_DIMENSION_MULTIPLE: u32 = 16;
 const GPT_IMAGE_2_MIN_PIXELS: u64 = 655_360;
 const GPT_IMAGE_2_MAX_PIXELS: u64 = 8_294_400;
+const CODEX_IMAGE_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const CODEX_IMAGE_MODEL: &str = "gpt-image-2";
+
+static CODEX_IMAGE_TURN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +132,12 @@ struct ImageSpec {
 
 fn image_spec(provider: &str) -> Result<ImageSpec> {
     match provider {
+        "codex" => Ok(ImageSpec {
+            default_model: CODEX_IMAGE_MODEL,
+            models: &[CODEX_IMAGE_MODEL],
+            sizes: OPENAI_SIZES,
+            base_url: CODEX_IMAGE_BASE_URL,
+        }),
         "openai" => Ok(ImageSpec {
             default_model: "gpt-image-1",
             models: &["gpt-image-1", "gpt-image-2"],
@@ -258,6 +271,27 @@ pub async fn generate_images(request: ImageRequest) -> Result<ImageBatchResult> 
     if request.context.provider == Provider::Codex {
         return generate_codex_images(request).await;
     }
+    generate_direct_images(request).await
+}
+
+/// Codex's image extension sends one direct Images API request per generated
+/// artifact, rather than using the `n` parameter.
+async fn generate_codex_images(request: ImageRequest) -> Result<ImageBatchResult> {
+    let mut images = Vec::with_capacity(usize::from(request.count));
+    for _ in 0..request.count {
+        let mut one = request.clone();
+        one.count = 1;
+        let batch = generate_direct_images(one).await?;
+        images.extend(batch.images);
+    }
+    Ok(ImageBatchResult {
+        images,
+        usage: None,
+    })
+}
+
+async fn generate_direct_images(request: ImageRequest) -> Result<ImageBatchResult> {
+    let prompt = request.prompt.trim();
     let provider = request.context.provider.as_str();
     let spec = image_spec(provider)?;
     let model = request
@@ -270,13 +304,37 @@ pub async fn generate_images(request: ImageRequest) -> Result<ImageBatchResult> 
             model,
         });
     }
+    if provider == "codex" && request.input_fidelity.is_some() {
+        return Err(Error::UnsupportedCapability(
+            provider.into(),
+            "input fidelity selection for Codex image generation",
+        ));
+    }
+    if provider == "codex" && !request.extra_body.is_empty() {
+        return Err(Error::UnsupportedCapability(
+            provider.into(),
+            "extra image request fields for Codex image generation",
+        ));
+    }
     if request.background.is_some() && provider == "nanogpt" {
         return Err(Error::UnsupportedCapability(
             provider.into(),
             "image background selection",
         ));
     }
-    let size = resolve_size(&request, &model, spec.sizes)?;
+    let size = if provider == "codex"
+        && request.size.is_none()
+        && request.width.is_none()
+        && request.height.is_none()
+    {
+        ResolvedSize {
+            value: "auto".into(),
+            width: None,
+            height: None,
+        }
+    } else {
+        resolve_size(&request, &model, spec.sizes)?
+    };
     let white_keying =
         request.background.as_deref() == Some("transparent") && is_gpt_image_2(&model);
     let provider_prompt = if white_keying {
@@ -289,12 +347,22 @@ pub async fn generate_images(request: ImageRequest) -> Result<ImageBatchResult> 
         "z-image-turbo" => "1024*1024".into(),
         _ => size.value.clone(),
     };
-    let mut body = json!({
-        "model": model,
-        "prompt": provider_prompt,
-        "size": provider_size,
-        "n": request.count,
-    });
+    let mut body = if provider == "codex" {
+        codex_image_body(
+            &request,
+            &model,
+            &provider_prompt,
+            &provider_size,
+            white_keying,
+        )
+    } else {
+        json!({
+            "model": model,
+            "prompt": provider_prompt,
+            "size": provider_size,
+            "n": request.count,
+        })
+    };
     if provider == "nanogpt" {
         body["response_format"] = json!("url");
         let mut extra = match model.as_str() {
@@ -311,7 +379,7 @@ pub async fn generate_images(request: ImageRequest) -> Result<ImageBatchResult> 
         if !extra.as_object().is_some_and(|value| value.is_empty()) {
             body["extra_body"] = extra;
         }
-    } else {
+    } else if provider != "codex" {
         body["quality"] = json!(request.quality.as_deref().unwrap_or("high"));
         if let Some(background) = &request.background {
             body["background"] = json!(if white_keying { "opaque" } else { background });
@@ -325,10 +393,28 @@ pub async fn generate_images(request: ImageRequest) -> Result<ImageBatchResult> 
     headers
         .entry("User-Agent".into())
         .or_insert_with(|| format!("lmx/{}", crate::VERSION));
+    if provider == "codex" {
+        headers
+            .entry("originator".into())
+            .or_insert_with(|| "lmx".into());
+        headers
+            .entry("x-codex-image-turn-id".into())
+            .or_insert_with(codex_image_turn_id);
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
-    let mut call = if !request.input_images.is_empty() && provider != "nanogpt" {
+    let mut call = if provider == "codex" && !request.input_images.is_empty() {
+        let images = request
+            .input_images
+            .iter()
+            .map(|path| Ok(json!({"image_url": image_path_data_url(path)?})))
+            .collect::<Result<Vec<_>>>()?;
+        body["images"] = json!(images);
+        client
+            .post(request_url(&request.context, spec.base_url, "edits")?)
+            .json(&body)
+    } else if !request.input_images.is_empty() && provider != "nanogpt" {
         let mut form = reqwest::multipart::Form::new()
             .text("model", model.clone())
             .text("prompt", provider_prompt.clone())
@@ -421,106 +507,47 @@ pub async fn generate_images(request: ImageRequest) -> Result<ImageBatchResult> 
     })
 }
 
-/// Generate or edit through Codex's existing Responses transport. Unlike the
-/// direct Image API providers, Codex invokes the built-in image generation
-/// tool and returns its base64 result as an output item.
-async fn generate_codex_images(request: ImageRequest) -> Result<ImageBatchResult> {
-    let count = request.count;
-    let mut images = Vec::with_capacity(usize::from(count));
-    for _ in 0..count {
-        let mut one = request.clone();
-        one.count = 1;
-        images.push(generate_codex_image(one).await?);
-    }
-    Ok(ImageBatchResult {
-        images,
-        usage: None,
+fn codex_image_body(
+    request: &ImageRequest,
+    model: &str,
+    prompt: &str,
+    size: &str,
+    white_keying: bool,
+) -> Value {
+    let background = request
+        .background
+        .as_deref()
+        .map(|background| if white_keying { "opaque" } else { background })
+        .unwrap_or("auto");
+    json!({
+        "prompt": prompt,
+        "background": background,
+        "model": model,
+        "quality": request.quality.as_deref().unwrap_or("auto"),
+        "size": size,
     })
 }
 
-async fn generate_codex_image(request: ImageRequest) -> Result<ImageResult> {
-    let response_request = codex_image_response_request(&request)?;
-    let mut machine =
-        ResponseMachine::new(&ProviderRegistry::from_environment()?, response_request)?;
-    let round = execute_round(&mut machine).await?;
-    let NextAction::Completed { result } = round.next else {
-        return Err(Error::Event(
-            "Codex image request unexpectedly requested a client-side tool call".into(),
-        ));
-    };
-    codex_image_result(&request, &result.model, &result.output_items)
-}
-
-fn codex_image_response_request(request: &ImageRequest) -> Result<ResponseRequest> {
-    let prompt = request.prompt.trim();
-    if prompt.is_empty() {
-        return Err(Error::State("prompt must not be empty".into()));
-    }
-    if request.input_fidelity.is_some() {
-        return Err(Error::UnsupportedCapability(
-            "codex".into(),
-            "input fidelity selection for Responses image generation",
-        ));
-    }
-    if !request.extra_body.is_empty() {
-        return Err(Error::UnsupportedCapability(
-            "codex".into(),
-            "extra image request fields for Responses image generation",
-        ));
-    }
-
-    let action = if request.input_images.is_empty() {
-        "generate"
-    } else {
-        "edit"
-    };
-    let mut image_tool = json!({"type": "image_generation", "action": action});
-    if let Some(quality) = &request.quality {
-        image_tool["quality"] = json!(quality);
-    }
-    if let Some(size) = codex_requested_size(request)? {
-        image_tool["size"] = json!(size);
-    }
-    if let Some(background) = &request.background {
-        image_tool["background"] = json!(background);
-    }
-
-    let mut content = vec![json!({"type": "input_text", "text": prompt})];
-    for path in &request.input_images {
-        content.push(json!({
-            "type": "input_image",
-            "image_url": image_path_data_url(path)?,
-        }));
-    }
-    Ok(ResponseRequest {
-        input: vec![serde_json::from_value(json!({
-            "type": "message",
-            "role": "user",
-            "content": content,
-        }))?],
-        context: request.context.clone(),
-        model: request.model.clone(),
-        instructions: String::new(),
-        tools: vec![image_tool],
-        tool_choice: Some(json!("required")),
-        reasoning_effort: None,
-        text_verbosity: "low".into(),
-        text_format: None,
-    })
-}
-
-fn codex_requested_size(request: &ImageRequest) -> Result<Option<String>> {
-    match (&request.size, request.width, request.height) {
-        (Some(size), _, _) => Ok(Some(size.clone())),
-        (None, Some(width), Some(height)) => Ok(Some(format!("{width}x{height}"))),
-        (None, None, None) => Ok(None),
-        _ => Err(Error::State(
-            "image width and height must be provided together".into(),
-        )),
-    }
+fn codex_image_turn_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let sequence = CODEX_IMAGE_TURN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{:08x}-{:04x}-7{:03x}-8{:03x}-{:012x}",
+        (timestamp >> 16) & 0xffff_ffff,
+        timestamp & 0xffff,
+        (timestamp >> 4) & 0x0fff,
+        timestamp & 0x0fff,
+        sequence & 0x0000_ffff_ffff_ffff,
+    )
 }
 
 fn image_path_data_url(path: &str) -> Result<String> {
+    if path.starts_with("data:") {
+        return Ok(path.into());
+    }
     let bytes =
         std::fs::read(path).map_err(|_| Error::State(format!("input image not found: {path}")))?;
     let extension = path
@@ -538,44 +565,6 @@ fn image_path_data_url(path: &str) -> Result<String> {
         "data:{media_type};base64,{}",
         STANDARD.encode(bytes)
     ))
-}
-
-fn codex_image_result(
-    request: &ImageRequest,
-    model: &str,
-    output_items: &[serde_json::Map<String, Value>],
-) -> Result<ImageResult> {
-    let result = output_items
-        .iter()
-        .find(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
-        .and_then(|item| item.get("result").and_then(Value::as_str))
-        .filter(|result| !result.is_empty())
-        .ok_or_else(|| {
-            Error::Event("Codex response did not include an image generation result".into())
-        })?;
-    let job = codex_image_job(request, model)?;
-    image_result_from_base64(job, result, false)
-}
-
-fn codex_image_job(request: &ImageRequest, model: &str) -> Result<ImageJob> {
-    let size = codex_requested_size(request)?.unwrap_or_else(|| "auto".into());
-    let (width, height) = if size == "auto" {
-        (None, None)
-    } else {
-        let (width, height) = parse_dimensions(&size)?;
-        (Some(width), Some(height))
-    };
-    Ok(ImageJob {
-        provider: "codex".into(),
-        model: model.into(),
-        prompt: request.prompt.trim().into(),
-        size,
-        width,
-        height,
-        mime_type: "image/png".into(),
-        background: request.background.clone(),
-        background_processing: None,
-    })
 }
 
 /// Stream partial images from the OpenAI-compatible Image API.
@@ -597,6 +586,30 @@ where
         ));
     }
     let image_request = request.image;
+    if image_request.context.provider == Provider::Codex {
+        if request.partial_images != 0 {
+            return Err(Error::UnsupportedCapability(
+                "codex".into(),
+                "partial image streaming",
+            ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let batch = generate_images(image_request).await?;
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        for (image_index, result) in batch.images.into_iter().enumerate() {
+            on_event(ImageStreamEvent::Completed {
+                image_index: image_index
+                    .try_into()
+                    .map_err(|_| Error::Event("image index exceeds u8".into()))?,
+                result,
+            })?;
+        }
+        return on_event(ImageStreamEvent::BatchCompleted { usage: batch.usage });
+    }
     if !(1..=10).contains(&image_request.count) {
         return Err(Error::State("count must be between 1 and 10".into()));
     }
@@ -612,15 +625,6 @@ where
         }
         on_event(ImageStreamEvent::BatchCompleted { usage: batch.usage })?;
         return Ok(());
-    }
-    if image_request.context.provider == Provider::Codex {
-        return stream_codex_image(
-            image_request,
-            request.partial_images,
-            cancellation,
-            on_event,
-        )
-        .await;
     }
     let prompt = image_request.prompt.trim();
     if prompt.is_empty() {
@@ -812,47 +816,6 @@ where
     ))
 }
 
-async fn stream_codex_image<F>(
-    request: ImageRequest,
-    partial_images: u8,
-    cancellation: &CancellationToken,
-    mut on_event: F,
-) -> Result<()>
-where
-    F: FnMut(ImageStreamEvent) -> Result<()>,
-{
-    let mut response_request = codex_image_response_request(&request)?;
-    response_request.tools[0]["partial_images"] = json!(partial_images);
-    let mut machine =
-        ResponseMachine::new(&ProviderRegistry::from_environment()?, response_request)?;
-    let job = codex_image_job(&request, machine.model())?;
-    let next = execute_round_with_observer(&mut machine, cancellation, |event| {
-        if let CoreEvent::ImageGenerationPartial {
-            partial_image_index,
-            partial_image_base64,
-        } = event
-        {
-            on_event(ImageStreamEvent::Partial {
-                image_index: 0,
-                partial_index: partial_image_index,
-                result: image_result_from_base64(job.clone(), &partial_image_base64, false)?,
-            })?;
-        }
-        Ok(())
-    })
-    .await?;
-    let NextAction::Completed { result } = next else {
-        return Err(Error::Event(
-            "Codex image request unexpectedly requested a client-side tool call".into(),
-        ));
-    };
-    on_event(ImageStreamEvent::Completed {
-        image_index: 0,
-        result: codex_image_result(&request, &result.model, &result.output_items)?,
-    })?;
-    on_event(ImageStreamEvent::BatchCompleted { usage: None })
-}
-
 async fn image_result_from_response_image(
     mut job: ImageJob,
     image: &Value,
@@ -1029,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_images_use_the_responses_image_tool_and_normalize_its_result() {
+    fn codex_images_use_the_direct_images_api_contract() {
         let request = ImageRequest {
             prompt: "A cobalt-blue square".into(),
             context: RequestContext {
@@ -1039,39 +1002,48 @@ mod tests {
                 headers: BTreeMap::from([("ChatGPT-Account-ID".into(), "account-123".into())]),
                 query: BTreeMap::new(),
             },
-            model: Some("gpt-5.6-sol".into()),
-            size: Some("1024x1024".into()),
+            model: Some(CODEX_IMAGE_MODEL.into()),
+            size: None,
             width: None,
             height: None,
-            quality: Some("high".into()),
+            quality: None,
             background: None,
             input_images: Vec::new(),
             input_fidelity: None,
             count: 1,
             extra_body: BTreeMap::new(),
         };
-        let response_request = codex_image_response_request(&request).unwrap();
-        let wire = ResponseMachine::new(&ProviderRegistry::default(), response_request)
-            .unwrap()
-            .wire_request()
-            .unwrap();
-        assert_eq!(wire.url, "https://chatgpt.com/backend-api/codex/responses");
-        assert_eq!(wire.body["tool_choice"], "required");
-        assert_eq!(wire.body["tools"][0]["type"], "image_generation");
-        assert_eq!(wire.body["tools"][0]["action"], "generate");
-        assert_eq!(wire.body["tools"][0]["size"], "1024x1024");
-        assert_eq!(wire.body["input"][0]["content"][0]["type"], "input_text");
-
-        let output = serde_json::from_value(json!({
-            "type": "image_generation_call",
-            "result": STANDARD.encode(b"generated-image"),
-        }))
-        .unwrap();
-        let image = codex_image_result(&request, "gpt-5.6-sol", &[output]).unwrap();
+        let body = codex_image_body(&request, CODEX_IMAGE_MODEL, &request.prompt, "auto", false);
         assert_eq!(
-            STANDARD.decode(image.content_base64).unwrap(),
-            b"generated-image"
+            request_url(&request.context, CODEX_IMAGE_BASE_URL, "generations").unwrap(),
+            "https://chatgpt.com/backend-api/codex/images/generations"
         );
-        assert_eq!(image.job.provider, "codex");
+        assert_eq!(
+            body,
+            json!({
+                "prompt": "A cobalt-blue square",
+                "background": "auto",
+                "model": "gpt-image-2",
+                "quality": "auto",
+                "size": "auto",
+            })
+        );
+        assert!(body.get("n").is_none());
+    }
+
+    #[test]
+    fn codex_edits_use_data_urls_and_the_edits_route() {
+        let mut request = request(None, None, None);
+        request.context.provider = Provider::Codex;
+        request.model = Some(CODEX_IMAGE_MODEL.into());
+        request.input_images = vec!["data:image/png;base64,aGVsbG8=".into()];
+        assert_eq!(
+            image_path_data_url(&request.input_images[0]).unwrap(),
+            request.input_images[0]
+        );
+        assert_eq!(
+            request_url(&request.context, CODEX_IMAGE_BASE_URL, "edits").unwrap(),
+            "https://chatgpt.com/backend-api/codex/images/edits"
+        );
     }
 }
