@@ -10,16 +10,35 @@ and [SECURITY.md](SECURITY.md).
 
 ## Supported providers
 
-LMX supports providers with documented, user-supplied credentials:
+LMX supports providers with user-supplied credentials:
 
 | Provider | Authentication | Configuration |
 | --- | --- | --- |
+| Codex | Request-scoped, host-managed ChatGPT OAuth | `context.apiKey` and `context.headers["ChatGPT-Account-ID"]` |
 | OpenAI | API key | `OPENAI_API_KEY` |
 | Azure OpenAI | API key | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, optional `AZURE_OPENAI_API_VERSION` |
 | NanoGPT | API key | `NANOGPT_API_KEY`, optional `NANOGPT_BASE_URL` |
 
-LMX does not read, reuse, or refresh ChatGPT/Codex OAuth credentials. Use the
-OpenAI API with an API key for OpenAI requests.
+Codex credentials are intentionally request-scoped. LMX does not read Codex
+credential files, persist tokens, or refresh OAuth credentials. The host that
+obtains the OAuth identity supplies it for each request; on an authentication
+failure, it refreshes the identity and starts a new request.
+
+```ts
+const result = await respond({
+  context: {
+    provider: 'codex',
+    apiKey: hostManagedAccessToken,
+    headers: { 'ChatGPT-Account-ID': hostManagedAccountId },
+  },
+  model: 'gpt-5.6-sol',
+  input: [{ type: 'message', role: 'user', content: 'Review this change.' }],
+});
+```
+
+LMX sends these credentials only to the Codex Responses backend. It does not
+provide a ChatGPT login flow or an implicit `provider: "codex"` credential
+loader.
 
 ## Install
 

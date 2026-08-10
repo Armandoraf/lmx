@@ -32,7 +32,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.2.0';
+const packageVersion = '0.2.1';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -49,7 +49,22 @@ export type WireRequest = {
 
 export const version = (): string => core.version();
 
-export type ProviderName = 'openai' | 'nanogpt' | 'azure';
+export type ProviderName = 'codex' | 'openai' | 'nanogpt' | 'azure';
+export type RequestContext = {
+  provider: ProviderName;
+  apiKey: string;
+  baseUrl?: string;
+  headers?: Record<string, string>;
+  query?: Record<string, string>;
+};
+/**
+ * A host-managed ChatGPT OAuth identity for one Codex request. LMX never
+ * loads, persists, or refreshes these values.
+ */
+export type CodexRequestContext = RequestContext & {
+  provider: 'codex';
+  headers: Record<'ChatGPT-Account-ID', string> & Record<string, string>;
+};
 export type ResponseItem = Record<string, unknown>;
 export type ProviderCapabilities = {
   supportsTools: boolean;
@@ -95,7 +110,7 @@ export type ResponseEvent =
   | CompletedEvent;
 export type ResponseRequest = {
   input: ResponseItem[];
-  context?: Record<string, unknown>;
+  context?: RequestContext;
   provider?: ProviderName;
   model?: string;
   instructions?: string;
@@ -128,8 +143,8 @@ export const availableModelsForProvider = (provider: ProviderName): readonly str
 export const defaultModelForProvider = (provider: ProviderName): string =>
   getProvider(provider).defaultModel;
 
-export const loadRequestContext = (provider: string): Record<string, unknown> =>
-  JSON.parse(core.loadRequestContextJson(JSON.stringify(provider))) as Record<string, unknown>;
+export const loadRequestContext = (provider: ProviderName | string): RequestContext =>
+  JSON.parse(core.loadRequestContextJson(JSON.stringify(provider))) as RequestContext;
 
 export const buildMessageItem = (params: { role: string; text: string }): Record<string, unknown> =>
   JSON.parse(core.buildMessageItemJson(params.role, params.text)) as Record<string, unknown>;

@@ -24,10 +24,15 @@ pub fn normalize_azure_endpoint(endpoint: &str) -> Result<String> {
     Ok(cleaned)
 }
 
-/// Build a request context using only each provider's documented credential
-/// mechanism. LMX does not read or refresh ChatGPT/Codex OAuth credentials.
+/// Build a request context using environment-backed provider credentials.
+///
+/// Codex deliberately has no implicit credential source: callers must provide
+/// a request-scoped context with their host-managed OAuth credentials.
 pub fn load_request_context(provider: Provider) -> Result<RequestContext> {
     match provider {
+        Provider::Codex => Err(Error::State(
+            "provider 'codex' requires a request-scoped context; LMX never reads, persists, or refreshes ChatGPT OAuth credentials".into(),
+        )),
         Provider::Openai => env_context(
             provider,
             "OPENAI_API_KEY",

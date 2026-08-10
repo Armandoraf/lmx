@@ -14,6 +14,8 @@ upgrade to the latest release before reporting an issue.
 
 ## Credential handling
 
-LMX reads documented provider credentials from the environment. It must never
-read, persist, refresh, or transmit ChatGPT/Codex OAuth credentials or another
-application's tokens.
+LMX reads documented provider credentials from the environment. Its Codex
+provider accepts only caller-supplied, request-scoped OAuth credentials and
+sends them only to the Codex backend. It must never read another application's
+credential files, persist credentials, refresh OAuth tokens, or substitute an
+identity from a process-level cache.

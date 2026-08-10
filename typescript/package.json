@@ -1,6 +1,6 @@
 {
   "name": "@armandoraf/lmx",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Unified TypeScript client for documented LLM provider APIs",
   "type": "module",
   "repository": {
@@ -52,15 +52,18 @@
     "tool-calling"
   ],
   "devDependencies": {
-    "@napi-rs/cli": "^3.6.0",
+    "@emnapi/core": "1.11.3",
+    "@emnapi/runtime": "1.11.3",
+    "@emnapi/wasi-threads": "1.2.3",
+    "@napi-rs/cli": "3.4.1",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.3",
     "zod": "^4.4.3"
   },
   "optionalDependencies": {
-    "@armandoraf/lmx-darwin-arm64": "0.2.0",
-    "@armandoraf/lmx-darwin-x64": "0.2.0",
-    "@armandoraf/lmx-linux-x64-gnu": "0.2.0",
-    "@armandoraf/lmx-linux-arm64-gnu": "0.2.0"
+    "@armandoraf/lmx-darwin-arm64": "0.2.1",
+    "@armandoraf/lmx-darwin-x64": "0.2.1",
+    "@armandoraf/lmx-linux-arm64-gnu": "0.2.1",
+    "@armandoraf/lmx-linux-x64-gnu": "0.2.1"
   }
 }

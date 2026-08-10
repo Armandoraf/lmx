@@ -27,9 +27,9 @@ provider credentials.
 ## Security and credentials
 
 Do not commit credentials, access tokens, or provider responses containing
-sensitive data. LMX supports documented provider authentication only; do not
-add code that reads, refreshes, or repurposes third-party application OAuth
-credentials.
+sensitive data. Do not add code that reads, persists, refreshes, or repurposes
+third-party application OAuth credentials. The Codex provider accepts only
+request-scoped credentials supplied by the embedding host.
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
