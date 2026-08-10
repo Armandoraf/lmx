@@ -239,17 +239,29 @@ impl ResponseMachine {
             .entry("Content-Type".into())
             .or_insert_with(|| "application/json".into());
         headers
+            .entry("Accept".into())
+            .or_insert_with(|| "text/event-stream".into());
+        headers
             .entry("User-Agent".into())
             .or_insert_with(|| format!("lmx/{}", crate::VERSION));
+        if self.uses_codex_responses_lite() {
+            headers.insert(
+                "X-OpenAI-Internal-Codex-Responses-Lite".into(),
+                "true".into(),
+            );
+        }
         let text = match &self.request.text_format {
             Some(format) => json!({"verbosity": self.request.text_verbosity, "format": format}),
             None => json!({"verbosity": self.request.text_verbosity}),
         };
+        let input = self
+            .running_input
+            .iter()
+            .map(openai_input_item)
+            .collect::<Vec<_>>();
         let mut body = json!({
             "model": self.model,
-            "instructions": self.request.instructions,
-            "input": self.running_input.iter().map(openai_input_item).collect::<Vec<_>>(),
-            "tools": self.request.tools,
+            "input": input,
             "tool_choice": self.request.tool_choice.clone().unwrap_or_else(|| json!("auto")),
             "parallel_tool_calls": false,
             "store": false,
@@ -257,7 +269,33 @@ impl ResponseMachine {
             "text": text,
             "stream": true,
         });
-        if let Some(effort) = &self.request.reasoning_effort {
+        if self.uses_codex_responses_lite() {
+            let mut input = vec![json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": self.request.tools,
+            })];
+            if !self.request.instructions.is_empty() {
+                input.push(json!({
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": self.request.instructions}],
+                }));
+            }
+            input.extend(body["input"].as_array().cloned().unwrap_or_default());
+            body["input"] = Value::Array(input);
+            let mut reasoning = json!({"summary": null, "context": "all_turns"});
+            if let Some(effort) = &self.request.reasoning_effort {
+                reasoning["effort"] = json!(effort);
+            }
+            body["reasoning"] = reasoning;
+        } else {
+            body["instructions"] = json!(self.request.instructions);
+            body["tools"] = Value::Array(self.request.tools.clone());
+        }
+        if !self.uses_codex_responses_lite()
+            && let Some(effort) = &self.request.reasoning_effort
+        {
             body["reasoning"] = json!({"effort": effort, "summary": null});
         }
         Ok(WireRequest {
@@ -270,6 +308,11 @@ impl ResponseMachine {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    fn uses_codex_responses_lite(&self) -> bool {
+        self.request.context.provider == crate::Provider::Codex
+            && self.model.starts_with("gpt-5.6-")
     }
 
     fn begin_round(&mut self) -> Result<()> {
@@ -652,6 +695,17 @@ mod tests {
         assert_eq!(wire.url, "https://chatgpt.com/backend-api/codex/responses");
         assert_eq!(wire.headers["Authorization"], "Bearer request-token");
         assert_eq!(wire.headers["ChatGPT-Account-ID"], "account-123");
+        assert_eq!(
+            wire.headers["X-OpenAI-Internal-Codex-Responses-Lite"],
+            "true"
+        );
+        assert_eq!(wire.headers["Accept"], "text/event-stream");
+        assert!(wire.body.get("instructions").is_none());
+        assert!(wire.body.get("tools").is_none());
+        assert_eq!(wire.body["reasoning"]["context"], "all_turns");
+        assert_eq!(wire.body["input"][0]["type"], "additional_tools");
+        assert_eq!(wire.body["input"][0]["role"], "developer");
+        assert_eq!(wire.body["input"][1]["role"], "user");
     }
 
     #[test]

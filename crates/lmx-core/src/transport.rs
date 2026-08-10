@@ -49,7 +49,10 @@ impl OpenAiTransport {
     where
         F: FnMut(Value) -> Result<()>,
     {
-        let mut request = self.client.post(&wire.url).json(&wire.body);
+        let mut request = self
+            .client
+            .post(&wire.url)
+            .body(serde_json::to_vec(&wire.body)?);
         for (name, value) in &wire.headers {
             request = request.header(name, value);
         }

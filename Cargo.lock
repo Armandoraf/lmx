@@ -571,7 +571,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lmx-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "base64",
  "eventsource-stream",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "lmx-node"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "lmx-core",
  "napi",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "lmx-python"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "lmx-core",
  "pyo3",

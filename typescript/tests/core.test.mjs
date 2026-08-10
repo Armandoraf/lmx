@@ -22,7 +22,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.2.4');
+  assert.equal(version(), '0.2.5');
 });
 
 async function withServer(handler, run) {
@@ -84,6 +84,27 @@ test('streamResponse yields a text delta before the SSE stream completes', async
     assert.equal(completed, false);
     for await (const _event of stream) {
       // Drain the completed response so the native session can release cleanly.
+    }
+  });
+});
+
+test('streamResponse sends exactly one JSON content type header', async () => {
+  await withServer((request, response) => {
+    const contentTypeHeaders = request.rawHeaders.filter(
+      (value, index) => index % 2 === 0 && value.toLowerCase() === 'content-type'
+    );
+    assert.equal(contentTypeHeaders.length, 1);
+    assert.equal(request.headers['content-type'], 'application/json');
+    request.resume();
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
+  }, async baseUrl => {
+    for await (const _event of streamResponse({
+      context: { provider: 'azure', apiKey: 'test', baseUrl },
+      model: 'gpt-5.5',
+      input: [{ type: 'message', role: 'user', content: 'Hello' }]
+    })) {
+      // Drain the stream.
     }
   });
 });
