@@ -52,6 +52,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          registry-url: https://npm.pkg.github.com
       - run: npm install
         working-directory: typescript
       - uses: actions/download-artifact@v4
@@ -64,8 +65,8 @@ jobs:
       - run: npm run release:platforms
         working-directory: typescript
         env:
-          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
       - run: npm publish --ignore-scripts
         working-directory: typescript
         env:
-          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
