@@ -2,6 +2,10 @@
 
 All notable changes to LMX are documented here.
 
+## [0.2.4] - 2026-08-10
+
+- Restored the GitHub Packages release configuration used by Effigy.
+
 ## [0.2.3] - 2026-08-10
 
 - Fixed Codex image generation and editing to use the direct ChatGPT OAuth
