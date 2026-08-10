@@ -49,7 +49,7 @@ export type WireRequest = {
 
 export const version = (): string => core.version();
 
-export type ProviderName = 'codex' | 'openai' | 'nanogpt' | 'azure';
+export type ProviderName = 'bedrock' | 'codex' | 'openai' | 'nanogpt' | 'azure';
 export type RequestContext = {
   provider: ProviderName;
   apiKey: string;

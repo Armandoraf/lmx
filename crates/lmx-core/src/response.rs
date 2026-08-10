@@ -213,8 +213,13 @@ impl ResponseMachine {
                 "native structured output",
             ));
         }
+        let base_url = if request.context.provider == crate::Provider::Bedrock {
+            String::new()
+        } else {
+            request.context.resolved_base_url(spec)?
+        };
         Ok(Self {
-            base_url: request.context.resolved_base_url(spec)?,
+            base_url,
             running_input: request.input.clone(),
             request,
             model,
@@ -229,6 +234,11 @@ impl ResponseMachine {
     pub fn wire_request(&self) -> Result<WireRequest> {
         if self.completed {
             return Err(Error::State("response is already complete".into()));
+        }
+        if self.request.context.provider == crate::Provider::Bedrock {
+            return Err(Error::State(
+                "bedrock provider uses its own transport; wire_request is not applicable".into(),
+            ));
         }
         let mut headers = self.request.context.headers.clone();
         headers.insert(
@@ -457,6 +467,14 @@ impl ResponseMachine {
 }
 
 fn validate_request_context(context: &RequestContext) -> Result<()> {
+    if context.provider == crate::Provider::Bedrock {
+        if context.headers.get("x-bedrock-access-key").is_none_or(|k| k.is_empty()) {
+            return Err(Error::State(
+                "provider 'bedrock' requires AWS credentials in its request context".into(),
+            ));
+        }
+        return Ok(());
+    }
     if context.provider != crate::Provider::Codex {
         return Ok(());
     }
@@ -518,9 +536,13 @@ pub async fn execute_round_with_observer<F>(
 where
     F: FnMut(CoreEvent) -> Result<()>,
 {
-    let transport = crate::OpenAiTransport::new();
     machine.begin_round()?;
-    stream_and_observe(&transport, machine, cancellation, &mut observer).await?;
+    if machine.request.context.provider == crate::Provider::Bedrock {
+        bedrock_stream_and_observe(machine, cancellation, &mut observer).await?;
+    } else {
+        let transport = crate::OpenAiTransport::new();
+        stream_and_observe(&transport, machine, cancellation, &mut observer).await?;
+    }
     machine.finish_round()
 }
 
@@ -542,6 +564,103 @@ where
             Ok(())
         })
         .await
+}
+
+async fn bedrock_stream_and_observe<F>(
+    machine: &mut ResponseMachine,
+    cancellation: &CancellationToken,
+    observer: &mut F,
+) -> Result<()>
+where
+    F: FnMut(CoreEvent) -> Result<()>,
+{
+    use crate::bedrock::{
+        BedrockCredentials, BedrockRequest, BedrockTransport, build_converse_messages,
+        convert_tools,
+    };
+
+    let credentials = BedrockCredentials::from_context(&machine.request.context)?;
+    let (system, messages) =
+        build_converse_messages(&machine.running_input, &machine.request.instructions);
+    let tools = convert_tools(&machine.request.tools);
+    let tool_choice = machine.request.tool_choice.as_ref().and_then(|tc| {
+        match tc.as_str() {
+            Some("auto") | None => Some(serde_json::json!({"auto": {}})),
+            Some("required") => Some(serde_json::json!({"any": {}})),
+            Some("none") => None,
+            _ => Some(tc.clone()),
+        }
+    });
+    let reasoning = machine.request.reasoning_effort.as_ref().map(|effort| {
+        serde_json::json!({"enabled": true, "budget_tokens": effort_to_budget(effort)})
+    });
+
+    let bedrock_request = BedrockRequest {
+        model: machine.model.clone(),
+        system,
+        messages,
+        tools,
+        tool_choice,
+        reasoning,
+    };
+
+    let transport = BedrockTransport::new();
+    let body = bedrock_request.body();
+    let model = machine.model.clone();
+
+    let mut text_buffer = String::new();
+
+    let completed_tools = transport
+        .converse_stream(&model, body, &credentials, cancellation, |core_event| {
+            match &core_event {
+                CoreEvent::TextDelta { delta } if !delta.is_empty() => {
+                    text_buffer.push_str(delta);
+                }
+                _ => {}
+            }
+            observer(core_event)
+        })
+        .await?;
+
+    let mut output_index: usize = 0;
+    if !text_buffer.is_empty() {
+        let item = Map::from_iter([
+            ("type".into(), Value::String("message".into())),
+            ("role".into(), Value::String("assistant".into())),
+            ("content".into(), Value::String(text_buffer)),
+        ]);
+        machine.round_items.insert(output_index, item);
+        output_index += 1;
+    }
+    for tc in &completed_tools {
+        let item = Map::from_iter([
+            ("type".into(), Value::String("function_call".into())),
+            ("name".into(), Value::String(tc.name.clone())),
+            ("call_id".into(), Value::String(tc.call_id.clone())),
+            (
+                "arguments".into(),
+                Value::String(if tc.arguments_json.is_empty() {
+                    "{}".into()
+                } else {
+                    tc.arguments_json.clone()
+                }),
+            ),
+        ]);
+        machine.round_items.insert(output_index, item);
+        output_index += 1;
+    }
+
+    machine.round_completed = true;
+    Ok(())
+}
+
+fn effort_to_budget(effort: &str) -> u32 {
+    match effort {
+        "low" => 1024,
+        "medium" => 4096,
+        "high" => 16384,
+        _ => 8192,
+    }
 }
 
 fn openai_input_item(item: &ResponseItem) -> Value {
