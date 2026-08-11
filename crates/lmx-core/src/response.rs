@@ -592,7 +592,7 @@ where
         }
     });
     let reasoning = machine.request.reasoning_effort.as_ref().map(|effort| {
-        serde_json::json!({"enabled": true, "budget_tokens": effort_to_budget(effort)})
+        serde_json::json!({"type": "enabled", "budget_tokens": effort_to_budget(effort)})
     });
 
     let bedrock_request = BedrockRequest {

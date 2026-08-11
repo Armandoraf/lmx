@@ -188,7 +188,7 @@ impl BedrockRequest {
         }
         if let Some(reasoning) = &self.reasoning {
             body["additionalModelRequestFields"] = json!({
-                "reasoning": reasoning,
+                "thinking": reasoning,
             });
         }
         body

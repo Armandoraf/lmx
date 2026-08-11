@@ -32,7 +32,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.2.7';
+const packageVersion = '0.2.8';
 
 if (core.version() !== packageVersion) {
   throw new Error(
