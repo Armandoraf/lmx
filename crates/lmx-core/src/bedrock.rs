@@ -725,6 +725,7 @@ mod tests {
             reasoning_effort: None,
             text_verbosity: "low".into(),
             text_format: None,
+            codex_protocol: None,
             context_management: None,
         };
 

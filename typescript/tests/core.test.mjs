@@ -22,7 +22,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.3.0');
+  assert.equal(version(), '0.4.0');
 });
 
 async function withServer(handler, run) {
@@ -366,6 +366,28 @@ test('Codex uses caller-supplied request-scoped credentials only', () => {
     () => loadRequestContext('codex'),
     /requires a request-scoped context/,
   );
+});
+
+test('Codex standard Responses mode uses server-side compaction explicitly', () => {
+  const wire = buildWireRequest({
+    context: {
+      provider: 'codex',
+      apiKey: 'request-token',
+      headers: { 'ChatGPT-Account-ID': 'account-123' },
+    },
+    model: 'gpt-5.6-luna',
+    codexProtocol: 'responses_standard',
+    contextManagement: { mode: 'server', compactThreshold: 244800 },
+    instructions: 'Answer concisely.',
+    tools: [{ type: 'function', name: 'work' }],
+    input: [{ type: 'message', role: 'user', content: 'Hello' }],
+  });
+  assert.equal(wire.headers['X-OpenAI-Internal-Codex-Responses-Lite'], undefined);
+  assert.equal(wire.body.instructions, 'Answer concisely.');
+  assert.equal(wire.body.tools[0].name, 'work');
+  assert.deepEqual(wire.body.context_management, [
+    { type: 'compaction', compact_threshold: 244800 },
+  ]);
 });
 
 test('the Effigy structured-output contract sends a JSON schema from Zod', async () => {

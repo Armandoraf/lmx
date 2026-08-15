@@ -32,7 +32,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.3.0';
+const packageVersion = '0.4.0';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -131,11 +131,16 @@ export type ResponseEvent =
   | FailedEvent
   | CompletedEvent;
 export type ContextManagement = {
+  mode: 'remote_v2';
   previousUsage?: ResponseUsage;
   previousUsageInputItemCount?: number;
   autoCompactTokenLimit?: number;
   retainedMessageTokenBudget?: number;
+} | {
+  mode: 'server';
+  compactThreshold: number;
 };
+export type CodexProtocol = 'responses_lite' | 'responses_standard';
 export type ResponseRequest = {
   input: ResponseItem[];
   context?: RequestContext;
@@ -147,6 +152,7 @@ export type ResponseRequest = {
   toolHandlers?: Record<string, ToolHandler>;
   reasoningEffort?: string;
   textVerbosity?: string;
+  codexProtocol?: CodexProtocol;
   contextManagement?: ContextManagement;
   signal?: AbortSignal;
 };

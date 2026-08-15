@@ -2,6 +2,17 @@
 
 All notable changes to LMX are documented here.
 
+## [0.4.0] - 2026-08-15
+
+- Add an explicit `responses_standard` Codex transport for ChatGPT OAuth,
+  alongside the existing `responses_lite` transport, with no automatic
+  fallback between protocols.
+- Support Responses server-side compaction through `context_management`, and
+  stream opaque compaction items as context-replacement events that remain
+  valid across subsequent tool rounds.
+- Make context management a discriminated API so Lite remote V2 compaction and
+  Standard server compaction cannot be mixed accidentally.
+
 ## [0.3.0] - 2026-08-15
 
 - Track provider response IDs and detailed input, cache-write, cache-hit,

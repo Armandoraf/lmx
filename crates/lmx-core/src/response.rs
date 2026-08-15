@@ -42,7 +42,16 @@ pub struct ResponseRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_format: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_protocol: Option<CodexProtocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_management: Option<ContextManagement>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexProtocol {
+    ResponsesLite,
+    ResponsesStandard,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,17 +66,26 @@ pub struct ResponseUsage {
     pub total_tokens: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextManagement {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_usage: Option<ResponseUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_usage_input_item_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_compact_token_limit: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retained_message_token_budget: Option<u64>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "mode",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ContextManagement {
+    RemoteV2 {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_usage: Option<ResponseUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_usage_input_item_count: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_compact_token_limit: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retained_message_token_budget: Option<u64>,
+    },
+    Server {
+        compact_threshold: u64,
+    },
 }
 
 fn default_verbosity() -> String {
@@ -107,6 +125,11 @@ pub enum CoreEvent {
         call_id: String,
         result: Value,
         output_item: ResponseItem,
+    },
+    ContextCompacted {
+        items: Vec<ResponseItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<ResponseUsage>,
     },
     Completed {
         output_items: Vec<ResponseItem>,
@@ -226,11 +249,13 @@ pub struct ResponseMachine {
     base_url: String,
     running_input: Vec<ResponseItem>,
     accumulated_items: Vec<ResponseItem>,
+    response_items: Vec<ResponseItem>,
     round_items: BTreeMap<usize, ResponseItem>,
     round_completed: bool,
     round_kind: RoundKind,
     round_response_id: Option<String>,
     round_usage: Option<ResponseUsage>,
+    round_server_compaction_index: Option<usize>,
     last_response_id: Option<String>,
     last_usage: Option<ResponseUsage>,
     last_usage_input_item_count: Option<usize>,
@@ -279,31 +304,62 @@ impl ResponseMachine {
                 "native structured output",
             ));
         }
-        if request.context_management.is_some()
+        if request.codex_protocol.is_some()
             && !(request.context.provider == crate::Provider::Codex
                 && model.starts_with("gpt-5.6-"))
         {
             return Err(Error::UnsupportedCapability(
                 spec.provider.as_str().into(),
-                "remote compaction v2",
+                "GPT-5.6 Codex Responses protocol selection",
             ));
+        }
+        let codex_protocol = request
+            .codex_protocol
+            .unwrap_or(CodexProtocol::ResponsesLite);
+        if let Some(management) = &request.context_management {
+            if matches!(
+                management,
+                ContextManagement::Server {
+                    compact_threshold: 0
+                }
+            ) {
+                return Err(Error::State(
+                    "server compact threshold must be greater than zero".into(),
+                ));
+            }
+            let supported = request.context.provider == crate::Provider::Codex
+                && model.starts_with("gpt-5.6-")
+                && matches!(
+                    (codex_protocol, management),
+                    (
+                        CodexProtocol::ResponsesLite,
+                        ContextManagement::RemoteV2 { .. }
+                    ) | (
+                        CodexProtocol::ResponsesStandard,
+                        ContextManagement::Server { .. }
+                    )
+                );
+            if !supported {
+                return Err(Error::UnsupportedCapability(
+                    spec.provider.as_str().into(),
+                    "selected Codex context-management protocol",
+                ));
+            }
         }
         let base_url = if request.context.provider == crate::Provider::Bedrock {
             String::new()
         } else {
             request.context.resolved_base_url(spec)?
         };
-        let (last_usage, last_usage_input_item_count) = match request
-            .context_management
-            .as_ref()
-            .map(|management| {
-                (
-                    management.previous_usage.clone(),
-                    management.previous_usage_input_item_count,
-                )
-            })
-            .unwrap_or_default()
-        {
+        let previous_usage = match request.context_management.as_ref() {
+            Some(ContextManagement::RemoteV2 {
+                previous_usage,
+                previous_usage_input_item_count,
+                ..
+            }) => (previous_usage.clone(), *previous_usage_input_item_count),
+            _ => (None, None),
+        };
+        let (last_usage, last_usage_input_item_count) = match previous_usage {
             (Some(usage), Some(item_count)) if item_count <= request.input.len() => {
                 (Some(usage), Some(item_count))
             }
@@ -320,11 +376,13 @@ impl ResponseMachine {
             request,
             model,
             accumulated_items: Vec::new(),
+            response_items: Vec::new(),
             round_items: BTreeMap::new(),
             round_completed: false,
             round_kind: RoundKind::Response,
             round_response_id: None,
             round_usage: None,
+            round_server_compaction_index: None,
             last_response_id: None,
             last_usage,
             last_usage_input_item_count,
@@ -357,6 +415,8 @@ impl ResponseMachine {
         headers
             .entry("User-Agent".into())
             .or_insert_with(|| format!("lmx/{}", crate::VERSION));
+        headers
+            .retain(|name, _| !name.eq_ignore_ascii_case("X-OpenAI-Internal-Codex-Responses-Lite"));
         if self.uses_codex_responses_lite() {
             headers.insert(
                 "X-OpenAI-Internal-Codex-Responses-Lite".into(),
@@ -428,11 +488,28 @@ impl ResponseMachine {
                 reasoning["effort"] = json!(effort);
             }
             body["reasoning"] = reasoning;
+        } else if self.uses_codex_responses_standard() {
+            body["instructions"] = json!(self.request.instructions);
+            body["tools"] = Value::Array(self.request.tools.clone());
+            let mut reasoning = json!({"summary": null, "context": "all_turns"});
+            if let Some(effort) = &self.request.reasoning_effort {
+                reasoning["effort"] = json!(effort);
+            }
+            body["reasoning"] = reasoning;
+            if let Some(ContextManagement::Server { compact_threshold }) =
+                &self.request.context_management
+            {
+                body["context_management"] = json!([{
+                    "type": "compaction",
+                    "compact_threshold": compact_threshold,
+                }]);
+            }
         } else {
             body["instructions"] = json!(self.request.instructions);
             body["tools"] = Value::Array(self.request.tools.clone());
         }
         if !self.uses_codex_responses_lite()
+            && !self.uses_codex_responses_standard()
             && let Some(effort) = &self.request.reasoning_effort
         {
             body["reasoning"] = json!({"effort": effort, "summary": null});
@@ -452,6 +529,17 @@ impl ResponseMachine {
     fn uses_codex_responses_lite(&self) -> bool {
         self.request.context.provider == crate::Provider::Codex
             && self.model.starts_with("gpt-5.6-")
+            && self
+                .request
+                .codex_protocol
+                .unwrap_or(CodexProtocol::ResponsesLite)
+                == CodexProtocol::ResponsesLite
+    }
+
+    fn uses_codex_responses_standard(&self) -> bool {
+        self.request.context.provider == crate::Provider::Codex
+            && self.model.starts_with("gpt-5.6-")
+            && self.request.codex_protocol == Some(CodexProtocol::ResponsesStandard)
     }
 
     fn begin_round(&mut self) -> Result<()> {
@@ -466,6 +554,7 @@ impl ResponseMachine {
         self.round_completed = false;
         self.round_response_id = None;
         self.round_usage = None;
+        self.round_server_compaction_index = None;
         self.round_kind = if self.should_compact() {
             RoundKind::Compaction
         } else {
@@ -475,15 +564,17 @@ impl ResponseMachine {
     }
 
     fn should_compact(&self) -> bool {
-        let Some(management) = &self.request.context_management else {
+        let Some(ContextManagement::RemoteV2 {
+            auto_compact_token_limit,
+            ..
+        }) = &self.request.context_management
+        else {
             return false;
         };
         if !self.uses_codex_responses_lite() {
             return false;
         }
-        let limit = management
-            .auto_compact_token_limit
-            .unwrap_or(CODEX_GPT_5_6_AUTO_COMPACT_TOKEN_LIMIT);
+        let limit = auto_compact_token_limit.unwrap_or(CODEX_GPT_5_6_AUTO_COMPACT_TOKEN_LIMIT);
         let estimated = match (&self.last_usage, self.last_usage_input_item_count) {
             (Some(usage), Some(item_count)) => {
                 usage.total_tokens + estimate_input_tokens(&self.running_input[item_count..])
@@ -524,6 +615,15 @@ impl ResponseMachine {
                 self.round_items.insert(output_index, item.clone());
                 if self.round_kind == RoundKind::Compaction {
                     Ok(Vec::new())
+                } else if self.uses_codex_responses_standard()
+                    && item.get("type").and_then(Value::as_str) == Some("compaction")
+                {
+                    validate_compaction_item(&item)?;
+                    self.round_server_compaction_index = Some(output_index);
+                    Ok(vec![CoreEvent::ContextCompacted {
+                        items: vec![item],
+                        usage: None,
+                    }])
                 } else {
                     Ok(vec![CoreEvent::OutputItem { output_index, item }])
                 }
@@ -596,22 +696,14 @@ impl ResponseMachine {
                     items.len()
                 )));
             };
-            if compaction.get("type").and_then(Value::as_str) != Some("compaction")
-                || compaction
-                    .get("encrypted_content")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
-            {
-                return Err(Error::Event(
-                    "remote compaction v2 did not return an encrypted compaction item".into(),
-                ));
-            }
-            let retained_budget = self
-                .request
-                .context_management
-                .as_ref()
-                .and_then(|management| management.retained_message_token_budget)
-                .unwrap_or(CODEX_RETAINED_MESSAGE_TOKEN_BUDGET);
+            validate_compaction_item(compaction)?;
+            let retained_budget = match self.request.context_management.as_ref() {
+                Some(ContextManagement::RemoteV2 {
+                    retained_message_token_budget,
+                    ..
+                }) => retained_message_token_budget.unwrap_or(CODEX_RETAINED_MESSAGE_TOKEN_BUDGET),
+                _ => CODEX_RETAINED_MESSAGE_TOKEN_BUDGET,
+            };
             let mut replacement = retain_compaction_messages(&self.running_input, retained_budget);
             replacement.push(compaction.clone());
             self.running_input = replacement.clone();
@@ -629,8 +721,29 @@ impl ResponseMachine {
             });
         }
         self.last_response_id = self.round_response_id.take();
-        self.accumulated_items.extend(items.clone());
-        self.running_input.extend(items.clone());
+        self.response_items.extend(
+            items
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) != Some("compaction"))
+                .cloned(),
+        );
+        if self.round_server_compaction_index.take().is_some() {
+            let Some(compaction_index) = items
+                .iter()
+                .rposition(|item| item.get("type").and_then(Value::as_str) == Some("compaction"))
+            else {
+                return Err(Error::State(
+                    "server compaction index did not resolve to a compaction item".into(),
+                ));
+            };
+            let replacement = items[compaction_index..].to_vec();
+            self.accumulated_items = replacement.clone();
+            self.running_input = replacement;
+            self.history_replaced = true;
+        } else {
+            self.accumulated_items.extend(items.clone());
+            self.running_input.extend(items.clone());
+        }
         self.last_usage = self.round_usage.take();
         self.last_usage_input_item_count =
             self.last_usage.as_ref().map(|_| self.running_input.len());
@@ -645,8 +758,8 @@ impl ResponseMachine {
                 result: ResponseResult {
                     provider: self.request.context.provider.as_str().into(),
                     model: self.model.clone(),
-                    output_text: output_text_from_items(&self.accumulated_items),
-                    output_items: self.accumulated_items.clone(),
+                    output_text: output_text_from_items(&self.response_items),
+                    output_items: self.response_items.clone(),
                     tool_roundtrips: self.tool_roundtrips,
                     response_id: self.last_response_id.clone(),
                     usage: self.last_usage.clone(),
@@ -677,6 +790,7 @@ impl ResponseMachine {
         for output in outputs {
             let item = function_call_output_item(&output);
             self.accumulated_items.push(item.clone());
+            self.response_items.push(item.clone());
             self.running_input.push(item.clone());
             events.push(CoreEvent::ToolCallCompleted {
                 name: String::new(),
@@ -687,6 +801,20 @@ impl ResponseMachine {
         }
         Ok(events)
     }
+}
+
+fn validate_compaction_item(item: &ResponseItem) -> Result<()> {
+    if item.get("type").and_then(Value::as_str) != Some("compaction")
+        || item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(Error::Event(
+            "compaction response did not contain encrypted context".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_response_usage(value: &Value) -> Option<ResponseUsage> {
@@ -1109,6 +1237,7 @@ mod tests {
             reasoning_effort: None,
             text_verbosity: "low".into(),
             text_format: None,
+            codex_protocol: None,
             context_management: None,
         };
         let wire = ResponseMachine::new(&ProviderRegistry::default(), request)
@@ -1129,6 +1258,242 @@ mod tests {
         assert_eq!(wire.body["input"][0]["type"], "additional_tools");
         assert_eq!(wire.body["input"][0]["role"], "developer");
         assert_eq!(wire.body["input"][1]["role"], "user");
+    }
+
+    #[test]
+    fn builds_a_standard_codex_request_with_server_compaction() {
+        let request = ResponseRequest {
+            input: vec![build_message_item("user", "Hello").unwrap()],
+            context: RequestContext {
+                provider: crate::Provider::Codex,
+                api_key: "request-token".into(),
+                base_url: None,
+                headers: BTreeMap::from([("ChatGPT-Account-ID".into(), "account-123".into())]),
+                query: BTreeMap::new(),
+            },
+            model: Some("gpt-5.6-luna".into()),
+            instructions: "Answer concisely.".into(),
+            tools: vec![json!({"type": "function", "name": "work"})],
+            tool_choice: None,
+            reasoning_effort: Some("low".into()),
+            text_verbosity: "low".into(),
+            text_format: None,
+            codex_protocol: Some(CodexProtocol::ResponsesStandard),
+            context_management: Some(ContextManagement::Server {
+                compact_threshold: 244_800,
+            }),
+        };
+        let wire = ResponseMachine::new(&ProviderRegistry::default(), request)
+            .unwrap()
+            .wire_request()
+            .unwrap();
+        assert!(
+            !wire
+                .headers
+                .contains_key("X-OpenAI-Internal-Codex-Responses-Lite")
+        );
+        assert_eq!(wire.body["instructions"], "Answer concisely.");
+        assert_eq!(wire.body["tools"][0]["name"], "work");
+        assert_eq!(wire.body["input"][0]["role"], "user");
+        assert_eq!(wire.body["reasoning"]["context"], "all_turns");
+        assert_eq!(
+            wire.body["context_management"],
+            json!([{"type": "compaction", "compact_threshold": 244_800}])
+        );
+    }
+
+    #[test]
+    fn server_compaction_replaces_history_and_continues_through_tools() {
+        let request = ResponseRequest {
+            input: vec![build_message_item("user", "Use a tool").unwrap()],
+            context: RequestContext {
+                provider: crate::Provider::Codex,
+                api_key: "request-token".into(),
+                base_url: None,
+                headers: BTreeMap::from([("ChatGPT-Account-ID".into(), "account-123".into())]),
+                query: BTreeMap::new(),
+            },
+            model: Some("gpt-5.6-luna".into()),
+            instructions: String::new(),
+            tools: vec![json!({"type": "function", "name": "work"})],
+            tool_choice: None,
+            reasoning_effort: Some("low".into()),
+            text_verbosity: "low".into(),
+            text_format: None,
+            codex_protocol: Some(CodexProtocol::ResponsesStandard),
+            context_management: Some(ContextManagement::Server {
+                compact_threshold: 1_000,
+            }),
+        };
+        let mut machine = ResponseMachine::new(&ProviderRegistry::default(), request).unwrap();
+        let compact_events = machine
+            .ingest(&json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "compaction", "encrypted_content": "opaque"}
+            }))
+            .unwrap();
+        assert!(matches!(
+            compact_events.as_slice(),
+            [CoreEvent::ContextCompacted { items, usage: None }]
+                if items[0]["encrypted_content"] == "opaque"
+        ));
+        machine
+            .ingest(&json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "name": "work",
+                    "call_id": "call_1",
+                    "arguments": "{}"
+                }
+            }))
+            .unwrap();
+        machine
+            .ingest(&json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_tool",
+                    "usage": {"input_tokens": 1_100, "output_tokens": 10, "total_tokens": 1_110}
+                }
+            }))
+            .unwrap();
+        assert!(matches!(
+            machine.finish_round().unwrap(),
+            NextAction::ToolCalls { calls } if calls[0].call_id == "call_1"
+        ));
+        machine
+            .submit_tool_outputs([ToolOutput {
+                call_id: "call_1".into(),
+                result: json!({"ok": true}),
+                content: None,
+            }])
+            .unwrap();
+        machine.begin_round().unwrap();
+        let wire = machine.wire_request().unwrap();
+        assert_eq!(wire.body["input"][0]["type"], "compaction");
+        assert_eq!(wire.body["input"][1]["type"], "function_call");
+        assert_eq!(wire.body["input"][2]["type"], "function_call_output");
+        machine
+            .ingest(&json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "message", "role": "assistant", "content": "Done"}
+            }))
+            .unwrap();
+        machine
+            .ingest(&json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_done",
+                    "usage": {"input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+                }
+            }))
+            .unwrap();
+        let NextAction::Completed { result } = machine.finish_round().unwrap() else {
+            panic!("expected completed")
+        };
+        assert!(matches!(
+            result.history_update,
+            InferenceHistoryUpdate::Replace { items }
+                if items[0]["type"] == "compaction" && items.last().unwrap()["content"] == "Done"
+        ));
+    }
+
+    #[test]
+    fn server_compaction_after_a_message_preserves_response_output() {
+        let request = ResponseRequest {
+            input: vec![build_message_item("user", "Hello").unwrap()],
+            context: RequestContext {
+                provider: crate::Provider::Codex,
+                api_key: "request-token".into(),
+                base_url: None,
+                headers: BTreeMap::from([("ChatGPT-Account-ID".into(), "account-123".into())]),
+                query: BTreeMap::new(),
+            },
+            model: Some("gpt-5.6-luna".into()),
+            instructions: String::new(),
+            tools: vec![],
+            tool_choice: None,
+            reasoning_effort: Some("low".into()),
+            text_verbosity: "low".into(),
+            text_format: None,
+            codex_protocol: Some(CodexProtocol::ResponsesStandard),
+            context_management: Some(ContextManagement::Server {
+                compact_threshold: 1_000,
+            }),
+        };
+        let mut machine = ResponseMachine::new(&ProviderRegistry::default(), request).unwrap();
+        machine
+            .ingest(&json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "message", "role": "assistant", "content": "Visible reply"}
+            }))
+            .unwrap();
+        machine
+            .ingest(&json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {"type": "compaction", "encrypted_content": "opaque"}
+            }))
+            .unwrap();
+        machine
+            .ingest(&json!({"type": "response.completed"}))
+            .unwrap();
+
+        let NextAction::Completed { result } = machine.finish_round().unwrap() else {
+            panic!("expected completed")
+        };
+        assert_eq!(result.output_text, "Visible reply");
+        assert_eq!(result.output_items[0]["type"], "message");
+        assert!(matches!(
+            result.history_update,
+            InferenceHistoryUpdate::Replace { items }
+                if items.len() == 1 && items[0]["type"] == "compaction"
+        ));
+    }
+
+    #[test]
+    fn rejects_mismatched_codex_protocol_and_context_management() {
+        let mut request = ResponseRequest {
+            input: vec![build_message_item("user", "Hello").unwrap()],
+            context: RequestContext {
+                provider: crate::Provider::Codex,
+                api_key: "request-token".into(),
+                base_url: None,
+                headers: BTreeMap::from([("ChatGPT-Account-ID".into(), "account-123".into())]),
+                query: BTreeMap::new(),
+            },
+            model: Some("gpt-5.6-luna".into()),
+            instructions: String::new(),
+            tools: vec![],
+            tool_choice: None,
+            reasoning_effort: None,
+            text_verbosity: "low".into(),
+            text_format: None,
+            codex_protocol: Some(CodexProtocol::ResponsesLite),
+            context_management: Some(ContextManagement::Server {
+                compact_threshold: 244_800,
+            }),
+        };
+        assert!(matches!(
+            ResponseMachine::new(&ProviderRegistry::default(), request.clone()),
+            Err(Error::UnsupportedCapability(_, _))
+        ));
+
+        request.codex_protocol = Some(CodexProtocol::ResponsesStandard);
+        request.context_management = Some(ContextManagement::RemoteV2 {
+            previous_usage: None,
+            previous_usage_input_item_count: None,
+            auto_compact_token_limit: None,
+            retained_message_token_budget: None,
+        });
+        assert!(matches!(
+            ResponseMachine::new(&ProviderRegistry::default(), request),
+            Err(Error::UnsupportedCapability(_, _))
+        ));
     }
 
     #[test]
@@ -1257,7 +1622,8 @@ mod tests {
             reasoning_effort: Some("medium".into()),
             text_verbosity: "medium".into(),
             text_format: None,
-            context_management: Some(ContextManagement {
+            codex_protocol: Some(CodexProtocol::ResponsesLite),
+            context_management: Some(ContextManagement::RemoteV2 {
                 previous_usage: Some(ResponseUsage {
                     input_tokens: 245_000,
                     cached_input_tokens: 200_000,
@@ -1360,7 +1726,8 @@ mod tests {
             reasoning_effort: Some("medium".into()),
             text_verbosity: "medium".into(),
             text_format: None,
-            context_management: Some(ContextManagement {
+            codex_protocol: Some(CodexProtocol::ResponsesLite),
+            context_management: Some(ContextManagement::RemoteV2 {
                 previous_usage: None,
                 previous_usage_input_item_count: None,
                 auto_compact_token_limit: Some(1_000),
