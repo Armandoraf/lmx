@@ -30,6 +30,36 @@ pub fn normalize_azure_endpoint(endpoint: &str) -> Result<String> {
 /// a request-scoped context with their host-managed OAuth credentials.
 pub fn load_request_context(provider: Provider) -> Result<RequestContext> {
     match provider {
+        Provider::Bedrock => {
+            let access_key = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
+                Error::State(
+                    "AWS_ACCESS_KEY_ID is required when provider 'bedrock' is used".into(),
+                )
+            })?;
+            let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
+                Error::State(
+                    "AWS_SECRET_ACCESS_KEY is required when provider 'bedrock' is used".into(),
+                )
+            })?;
+            let region = std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .unwrap_or_else(|_| "us-east-1".into());
+            let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
+            let mut headers = BTreeMap::new();
+            headers.insert("x-bedrock-access-key".into(), access_key);
+            headers.insert("x-bedrock-secret-key".into(), secret_key);
+            headers.insert("x-bedrock-region".into(), region);
+            if let Some(token) = session_token {
+                headers.insert("x-bedrock-session-token".into(), token);
+            }
+            Ok(RequestContext {
+                provider,
+                api_key: String::new(),
+                base_url: None,
+                headers,
+                query: BTreeMap::new(),
+            })
+        }
         Provider::Codex => Err(Error::State(
             "provider 'codex' requires a request-scoped context; LMX never reads, persists, or refreshes ChatGPT OAuth credentials".into(),
         )),

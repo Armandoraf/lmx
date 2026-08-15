@@ -36,6 +36,29 @@ const result = await respond({
 });
 ```
 
+ChatGPT OAuth GPT-5.6 requests use the Lite transport by default. Hosts can
+opt into the Standard Responses transport and its native server compaction
+without any protocol fallback:
+
+```ts
+const result = await respond({
+  context: {
+    provider: 'codex',
+    apiKey: hostManagedAccessToken,
+    headers: { 'ChatGPT-Account-ID': hostManagedAccountId },
+  },
+  model: 'gpt-5.6-sol',
+  codexProtocol: 'responses_standard',
+  contextManagement: { mode: 'server', compactThreshold: 244_800 },
+  input: replayedNativeItems,
+});
+```
+
+Standard mode omits the internal Lite header. When the backend compacts the
+conversation, LMX emits a `context_compacted` event and completes with a
+`replace` history update containing the opaque compaction item and subsequent
+output items. Persist and replay that native history unchanged.
+
 LMX sends these credentials only to the Codex Responses backend. It does not
 provide a ChatGPT login flow or an implicit `provider: "codex"` credential
 loader.

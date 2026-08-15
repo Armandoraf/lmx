@@ -22,7 +22,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.2.4');
+  assert.equal(version(), '0.4.0');
 });
 
 async function withServer(handler, run) {
@@ -38,6 +38,7 @@ async function withServer(handler, run) {
 
 test('the Rust response engine preserves tool-round state', async () => {
   const requests = [];
+  const events = [];
   await withServer((request, response) => {
     let body = '';
     request.on('data', chunk => { body += chunk; });
@@ -47,10 +48,20 @@ test('the Rust response engine preserves tool-round state', async () => {
         ? { type: 'function_call', call_id: 'call_add', name: 'add', arguments: '{"a":2,"b":3}' }
         : { type: 'message', role: 'assistant', content: 'five' };
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(`data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item })}\n\ndata: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
+      response.end(`data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item })}\n\ndata: ${JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: `resp_${requests.length}`,
+          usage: {
+            input_tokens: requests.length * 100,
+            input_tokens_details: { cached_tokens: 25, cache_write_tokens: 5 },
+            output_tokens: 10,
+            total_tokens: requests.length * 100 + 10,
+          },
+        },
+      })}\n\n`);
     });
   }, async baseUrl => {
-    const events = [];
     for await (const event of streamResponse({
       context: { provider: 'azure', apiKey: 'test', baseUrl },
       model: 'gpt-5.5',
@@ -62,6 +73,25 @@ test('the Rust response engine preserves tool-round state', async () => {
   });
   assert.equal(requests.length, 2);
   assert.equal(requests[1].input.at(-1).output, '{"sum":5}');
+  assert.deepEqual(
+    events.find(event => event.type === 'tool_call_completed')?.outputItem,
+    {
+      type: 'function_call_output',
+      call_id: 'call_add',
+      output: '{"sum":5}',
+    },
+  );
+  const completed = events.at(-1);
+  assert.equal(completed.responseId, 'resp_2');
+  assert.deepEqual(completed.usage, {
+    inputTokens: 200,
+    cachedInputTokens: 25,
+    cacheWriteInputTokens: 5,
+    outputTokens: 10,
+    totalTokens: 210,
+  });
+  assert.equal(completed.historyUpdate.type, 'append');
+  assert.equal(completed.historyUpdate.items.length, 3);
 });
 
 test('streamResponse yields a text delta before the SSE stream completes', async () => {
@@ -84,6 +114,27 @@ test('streamResponse yields a text delta before the SSE stream completes', async
     assert.equal(completed, false);
     for await (const _event of stream) {
       // Drain the completed response so the native session can release cleanly.
+    }
+  });
+});
+
+test('streamResponse sends exactly one JSON content type header', async () => {
+  await withServer((request, response) => {
+    const contentTypeHeaders = request.rawHeaders.filter(
+      (value, index) => index % 2 === 0 && value.toLowerCase() === 'content-type'
+    );
+    assert.equal(contentTypeHeaders.length, 1);
+    assert.equal(request.headers['content-type'], 'application/json');
+    request.resume();
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
+  }, async baseUrl => {
+    for await (const _event of streamResponse({
+      context: { provider: 'azure', apiKey: 'test', baseUrl },
+      model: 'gpt-5.5',
+      input: [{ type: 'message', role: 'user', content: 'Hello' }]
+    })) {
+      // Drain the stream.
     }
   });
 });
@@ -315,6 +366,28 @@ test('Codex uses caller-supplied request-scoped credentials only', () => {
     () => loadRequestContext('codex'),
     /requires a request-scoped context/,
   );
+});
+
+test('Codex standard Responses mode uses server-side compaction explicitly', () => {
+  const wire = buildWireRequest({
+    context: {
+      provider: 'codex',
+      apiKey: 'request-token',
+      headers: { 'ChatGPT-Account-ID': 'account-123' },
+    },
+    model: 'gpt-5.6-luna',
+    codexProtocol: 'responses_standard',
+    contextManagement: { mode: 'server', compactThreshold: 244800 },
+    instructions: 'Answer concisely.',
+    tools: [{ type: 'function', name: 'work' }],
+    input: [{ type: 'message', role: 'user', content: 'Hello' }],
+  });
+  assert.equal(wire.headers['X-OpenAI-Internal-Codex-Responses-Lite'], undefined);
+  assert.equal(wire.body.instructions, 'Answer concisely.');
+  assert.equal(wire.body.tools[0].name, 'work');
+  assert.deepEqual(wire.body.context_management, [
+    { type: 'compaction', compact_threshold: 244800 },
+  ]);
 });
 
 test('the Effigy structured-output contract sends a JSON schema from Zod', async () => {

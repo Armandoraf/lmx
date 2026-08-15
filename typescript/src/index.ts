@@ -32,7 +32,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.2.4';
+const packageVersion = '0.4.0';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -49,7 +49,7 @@ export type WireRequest = {
 
 export const version = (): string => core.version();
 
-export type ProviderName = 'codex' | 'openai' | 'nanogpt' | 'azure';
+export type ProviderName = 'bedrock' | 'codex' | 'openai' | 'nanogpt' | 'azure';
 export type RequestContext = {
   provider: ProviderName;
   apiKey: string;
@@ -98,11 +98,28 @@ export type ToolCallStartedEvent = {
 };
 export type ToolCallCompletedEvent = {
   type: 'tool_call_completed'; name: string; callId: string; result: unknown;
+  outputItem: ResponseItem;
+};
+export type ResponseUsage = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+};
+export type InferenceHistoryUpdate =
+  | { type: 'append'; items: ResponseItem[] }
+  | { type: 'replace'; items: ResponseItem[] };
+export type ContextCompactedEvent = {
+  type: 'context_compacted';
+  items: ResponseItem[];
+  usage?: ResponseUsage;
 };
 export type FailedEvent = { type: 'failed'; error: string };
 export type CompletedEvent = {
   type: 'completed'; provider: ProviderName; model: string; outputItems: ResponseItem[];
-  outputText: string; toolRoundtrips: number;
+  outputText: string; toolRoundtrips: number; responseId?: string; usage?: ResponseUsage;
+  historyUpdate: InferenceHistoryUpdate;
 };
 export type ResponseEvent =
   | TextDeltaEvent
@@ -110,8 +127,20 @@ export type ResponseEvent =
   | ImageGenerationPartialEvent
   | ToolCallStartedEvent
   | ToolCallCompletedEvent
+  | ContextCompactedEvent
   | FailedEvent
   | CompletedEvent;
+export type ContextManagement = {
+  mode: 'remote_v2';
+  previousUsage?: ResponseUsage;
+  previousUsageInputItemCount?: number;
+  autoCompactTokenLimit?: number;
+  retainedMessageTokenBudget?: number;
+} | {
+  mode: 'server';
+  compactThreshold: number;
+};
+export type CodexProtocol = 'responses_lite' | 'responses_standard';
 export type ResponseRequest = {
   input: ResponseItem[];
   context?: RequestContext;
@@ -123,6 +152,8 @@ export type ResponseRequest = {
   toolHandlers?: Record<string, ToolHandler>;
   reasoningEffort?: string;
   textVerbosity?: string;
+  codexProtocol?: CodexProtocol;
+  contextManagement?: ContextManagement;
   signal?: AbortSignal;
 };
 
@@ -382,8 +413,15 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
         yield { type: 'completed', ...(next.result as Omit<CompletedEvent, 'type'>) };
         return;
       }
+      if (next.type === 'compacted') {
+        yield {
+          type: 'context_compacted',
+          items: next.items as ResponseItem[],
+          ...(next.usage ? { usage: next.usage as ResponseUsage } : {}),
+        };
+        continue;
+      }
       const calls = next.calls as Array<{ name: string; callId: string; arguments: Record<string, unknown> }>;
-      const outputs: Array<Record<string, unknown>> = [];
       for (const call of calls) {
         yield { type: 'tool_call_started', ...call };
         let output: Record<string, unknown>;
@@ -398,11 +436,24 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
           if (signal?.aborted) throw abortError(signal);
           output = toolFailureOutput(call.callId, error instanceof Error ? error.message : String(error));
         }
-        outputs.push(output);
-        yield { type: 'tool_call_completed', name: call.name, callId: call.callId, result: output.result };
+        if (signal?.aborted) throw abortError(signal);
+        const [completed] = JSON.parse(
+          session.submitToolOutputsJson(JSON.stringify([output])),
+        ) as Array<{
+          type: 'tool_call_completed';
+          call_id: string;
+          result: unknown;
+          output_item: ResponseItem;
+        }>;
+        if (!completed) throw new Error('tool output was not accepted');
+        yield {
+          type: 'tool_call_completed',
+          name: call.name,
+          callId: completed.call_id,
+          result: completed.result,
+          outputItem: completed.output_item,
+        };
       }
-      if (signal?.aborted) throw abortError(signal);
-      session.submitToolOutputsJson(JSON.stringify(outputs));
     }
   } finally {
     signal?.removeEventListener('abort', cancel);
@@ -416,6 +467,9 @@ export type ResponseResult = {
   outputItems: ResponseItem[];
   outputText: string;
   toolRoundtrips: number;
+  responseId?: string;
+  usage?: ResponseUsage;
+  historyUpdate: InferenceHistoryUpdate;
 };
 
 export const respond = async (request: ResponseRequest): Promise<ResponseResult> => {

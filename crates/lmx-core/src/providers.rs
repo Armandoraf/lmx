@@ -11,6 +11,7 @@ use crate::{Error, Result};
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
+    Bedrock,
     Codex,
     Openai,
     Nanogpt,
@@ -20,6 +21,7 @@ pub enum Provider {
 impl Provider {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Bedrock => "bedrock",
             Self::Codex => "codex",
             Self::Openai => "openai",
             Self::Nanogpt => "nanogpt",
@@ -83,6 +85,10 @@ impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::with_models(
             vec![
+                "us.anthropic.claude-opus-4-6-v1".into(),
+                "us.anthropic.claude-sonnet-4-6".into(),
+            ],
+            vec![
                 "gpt-5.6-sol".into(),
                 "gpt-5.6-terra".into(),
                 "gpt-5.6-luna".into(),
@@ -112,6 +118,14 @@ impl ProviderRegistry {
     }
 
     fn from_environment_uncached() -> Result<Self> {
+        let bedrock_models = models_from_environment(
+            "BEDROCK_MODELS",
+            vec![
+                std::env::var("BEDROCK_MODEL")
+                    .unwrap_or_else(|_| "us.anthropic.claude-opus-4-6-v1".into()),
+                "us.anthropic.claude-sonnet-4-6".into(),
+            ],
+        )?;
         let codex_models = models_from_environment(
             "CODEX_MODELS",
             vec![
@@ -148,6 +162,7 @@ impl ProviderRegistry {
             ],
         )?;
         Ok(Self::with_models(
+            bedrock_models,
             codex_models,
             openai_models,
             nanogpt_models,
@@ -196,6 +211,7 @@ impl ProviderRegistry {
     }
 
     fn with_models(
+        bedrock_models: Vec<String>,
         codex_models: Vec<String>,
         openai_models: Vec<String>,
         nanogpt_models: Vec<String>,
@@ -210,6 +226,23 @@ impl ProviderRegistry {
             supports_reasoning: true,
         };
         let mut specs = BTreeMap::new();
+        specs.insert(
+            Provider::Bedrock,
+            ProviderSpec {
+                provider: Provider::Bedrock,
+                default_model: bedrock_models[0].clone(),
+                available_models: bedrock_models,
+                base_url: None,
+                capabilities: ProviderCapabilities {
+                    supports_tools: true,
+                    supports_structured_output: true,
+                    supports_streaming: true,
+                    supports_images: false,
+                    supports_pdf: true,
+                    supports_reasoning: true,
+                },
+            },
+        );
         specs.insert(
             Provider::Codex,
             ProviderSpec {
