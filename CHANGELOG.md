@@ -2,6 +2,12 @@
 
 All notable changes to LMX are documented here.
 
+## [0.2.9] - 2026-08-15
+
+- Expose the exact provider input item submitted for each completed tool call,
+  allowing hosts to checkpoint and faithfully replay stateless Responses
+  conversations, including encrypted reasoning and multimodal tool outputs.
+
 ## [0.2.4] - 2026-08-10
 
 - Restored the GitHub Packages release configuration used by Effigy.

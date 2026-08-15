@@ -22,7 +22,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.2.5');
+  assert.equal(version(), '0.2.9');
 });
 
 async function withServer(handler, run) {
@@ -38,6 +38,7 @@ async function withServer(handler, run) {
 
 test('the Rust response engine preserves tool-round state', async () => {
   const requests = [];
+  const events = [];
   await withServer((request, response) => {
     let body = '';
     request.on('data', chunk => { body += chunk; });
@@ -50,7 +51,6 @@ test('the Rust response engine preserves tool-round state', async () => {
       response.end(`data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item })}\n\ndata: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
     });
   }, async baseUrl => {
-    const events = [];
     for await (const event of streamResponse({
       context: { provider: 'azure', apiKey: 'test', baseUrl },
       model: 'gpt-5.5',
@@ -62,6 +62,14 @@ test('the Rust response engine preserves tool-round state', async () => {
   });
   assert.equal(requests.length, 2);
   assert.equal(requests[1].input.at(-1).output, '{"sum":5}');
+  assert.deepEqual(
+    events.find(event => event.type === 'tool_call_completed')?.outputItem,
+    {
+      type: 'function_call_output',
+      call_id: 'call_add',
+      output: '{"sum":5}',
+    },
+  );
 });
 
 test('streamResponse yields a text delta before the SSE stream completes', async () => {

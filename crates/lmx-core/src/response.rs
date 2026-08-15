@@ -79,6 +79,7 @@ pub enum CoreEvent {
         name: String,
         call_id: String,
         result: Value,
+        output_item: ResponseItem,
     },
     Completed {
         output_items: Vec<ResponseItem>,
@@ -455,11 +456,12 @@ impl ResponseMachine {
         for output in outputs {
             let item = function_call_output_item(&output);
             self.accumulated_items.push(item.clone());
-            self.running_input.push(item);
+            self.running_input.push(item.clone());
             events.push(CoreEvent::ToolCallCompleted {
                 name: String::new(),
                 call_id: output.call_id,
                 result: output.result,
+                output_item: item,
             });
         }
         Ok(events)
@@ -927,5 +929,32 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(machine.tool_roundtrips, 9);
+    }
+
+    #[test]
+    fn exposes_the_exact_submitted_tool_output_item() {
+        let mut machine = ResponseMachine::new(&ProviderRegistry::default(), request()).unwrap();
+        let events = machine
+            .submit_tool_outputs([ToolOutput {
+                call_id: "call_image".into(),
+                result: json!({"ok": true}),
+                content: Some(json!([{"type": "input_text", "text": "done"}])),
+            }])
+            .unwrap();
+        let [CoreEvent::ToolCallCompleted { output_item, .. }] = events.as_slice()
+        else {
+            panic!("expected a completed tool event")
+        };
+        assert_eq!(
+            output_item,
+            &Map::from_iter([
+                ("type".into(), json!("function_call_output")),
+                ("call_id".into(), json!("call_image")),
+                (
+                    "output".into(),
+                    json!([{"type": "input_text", "text": "done"}]),
+                ),
+            ])
+        );
     }
 }

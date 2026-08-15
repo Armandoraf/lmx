@@ -32,7 +32,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.2.8';
+const packageVersion = '0.2.9';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -98,6 +98,7 @@ export type ToolCallStartedEvent = {
 };
 export type ToolCallCompletedEvent = {
   type: 'tool_call_completed'; name: string; callId: string; result: unknown;
+  outputItem: ResponseItem;
 };
 export type FailedEvent = { type: 'failed'; error: string };
 export type CompletedEvent = {
@@ -383,7 +384,6 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
         return;
       }
       const calls = next.calls as Array<{ name: string; callId: string; arguments: Record<string, unknown> }>;
-      const outputs: Array<Record<string, unknown>> = [];
       for (const call of calls) {
         yield { type: 'tool_call_started', ...call };
         let output: Record<string, unknown>;
@@ -398,11 +398,24 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
           if (signal?.aborted) throw abortError(signal);
           output = toolFailureOutput(call.callId, error instanceof Error ? error.message : String(error));
         }
-        outputs.push(output);
-        yield { type: 'tool_call_completed', name: call.name, callId: call.callId, result: output.result };
+        if (signal?.aborted) throw abortError(signal);
+        const [completed] = JSON.parse(
+          session.submitToolOutputsJson(JSON.stringify([output])),
+        ) as Array<{
+          type: 'tool_call_completed';
+          call_id: string;
+          result: unknown;
+          output_item: ResponseItem;
+        }>;
+        if (!completed) throw new Error('tool output was not accepted');
+        yield {
+          type: 'tool_call_completed',
+          name: call.name,
+          callId: completed.call_id,
+          result: completed.result,
+          outputItem: completed.output_item,
+        };
       }
-      if (signal?.aborted) throw abortError(signal);
-      session.submitToolOutputsJson(JSON.stringify(outputs));
     }
   } finally {
     signal?.removeEventListener('abort', cancel);
