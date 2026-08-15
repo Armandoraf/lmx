@@ -32,7 +32,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.2.9';
+const packageVersion = '0.3.0';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -100,10 +100,26 @@ export type ToolCallCompletedEvent = {
   type: 'tool_call_completed'; name: string; callId: string; result: unknown;
   outputItem: ResponseItem;
 };
+export type ResponseUsage = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+};
+export type InferenceHistoryUpdate =
+  | { type: 'append'; items: ResponseItem[] }
+  | { type: 'replace'; items: ResponseItem[] };
+export type ContextCompactedEvent = {
+  type: 'context_compacted';
+  items: ResponseItem[];
+  usage?: ResponseUsage;
+};
 export type FailedEvent = { type: 'failed'; error: string };
 export type CompletedEvent = {
   type: 'completed'; provider: ProviderName; model: string; outputItems: ResponseItem[];
-  outputText: string; toolRoundtrips: number;
+  outputText: string; toolRoundtrips: number; responseId?: string; usage?: ResponseUsage;
+  historyUpdate: InferenceHistoryUpdate;
 };
 export type ResponseEvent =
   | TextDeltaEvent
@@ -111,8 +127,15 @@ export type ResponseEvent =
   | ImageGenerationPartialEvent
   | ToolCallStartedEvent
   | ToolCallCompletedEvent
+  | ContextCompactedEvent
   | FailedEvent
   | CompletedEvent;
+export type ContextManagement = {
+  previousUsage?: ResponseUsage;
+  previousUsageInputItemCount?: number;
+  autoCompactTokenLimit?: number;
+  retainedMessageTokenBudget?: number;
+};
 export type ResponseRequest = {
   input: ResponseItem[];
   context?: RequestContext;
@@ -124,6 +147,7 @@ export type ResponseRequest = {
   toolHandlers?: Record<string, ToolHandler>;
   reasoningEffort?: string;
   textVerbosity?: string;
+  contextManagement?: ContextManagement;
   signal?: AbortSignal;
 };
 
@@ -383,6 +407,14 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
         yield { type: 'completed', ...(next.result as Omit<CompletedEvent, 'type'>) };
         return;
       }
+      if (next.type === 'compacted') {
+        yield {
+          type: 'context_compacted',
+          items: next.items as ResponseItem[],
+          ...(next.usage ? { usage: next.usage as ResponseUsage } : {}),
+        };
+        continue;
+      }
       const calls = next.calls as Array<{ name: string; callId: string; arguments: Record<string, unknown> }>;
       for (const call of calls) {
         yield { type: 'tool_call_started', ...call };
@@ -429,6 +461,9 @@ export type ResponseResult = {
   outputItems: ResponseItem[];
   outputText: string;
   toolRoundtrips: number;
+  responseId?: string;
+  usage?: ResponseUsage;
+  historyUpdate: InferenceHistoryUpdate;
 };
 
 export const respond = async (request: ResponseRequest): Promise<ResponseResult> => {

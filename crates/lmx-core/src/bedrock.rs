@@ -79,10 +79,7 @@ impl BedrockTransport {
     where
         F: FnMut(CoreEvent) -> Result<()>,
     {
-        let host = format!(
-            "bedrock-runtime.{}.amazonaws.com",
-            credentials.region
-        );
+        let host = format!("bedrock-runtime.{}.amazonaws.com", credentials.region);
         let path = format!("/model/{}/converse-stream", model);
         let url = format!("https://{}{}", host, path);
         let payload = serde_json::to_vec(&body)?;
@@ -206,16 +203,10 @@ pub fn build_converse_messages(
     }
     let mut messages: Vec<Value> = Vec::new();
     for item in input {
-        let item_type = item
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
         match item_type {
             "message" => {
-                let role = item
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("user");
+                let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
                 if role == "system" || role == "developer" {
                     if let Some(content) = item.get("content") {
                         let text = match content {
@@ -244,10 +235,8 @@ pub fn build_converse_messages(
                             if let Some(text) = p.get("text").and_then(Value::as_str) {
                                 Some(json!({"text": text}))
                             } else if let Some(image) = p.get("image_url") {
-                                let url = image
-                                    .get("url")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default();
+                                let url =
+                                    image.get("url").and_then(Value::as_str).unwrap_or_default();
                                 if let Some(data) = url.strip_prefix("data:image/") {
                                     let (media_type, b64) =
                                         data.split_once(";base64,").unwrap_or(("png", ""));
@@ -302,11 +291,10 @@ pub fn build_converse_messages(
 fn append_to_last_or_push(messages: &mut Vec<Value>, role: &str, content_block: Value) {
     if let Some(last) = messages.last_mut()
         && last.get("role").and_then(Value::as_str) == Some(role)
+        && let Some(content) = last.get_mut("content").and_then(Value::as_array_mut)
     {
-        if let Some(content) = last.get_mut("content").and_then(Value::as_array_mut) {
-            content.push(content_block);
-            return;
-        }
+        content.push(content_block);
+        return;
     }
     messages.push(json!({"role": role, "content": [content_block]}));
 }
@@ -362,12 +350,16 @@ fn parse_bedrock_event(event: &BedrockEvent) -> Result<Vec<BedrockStreamEvent>> 
     match event.event_type.as_str() {
         "contentBlockDelta" => {
             let delta = value.get("delta").unwrap_or(value);
-            if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                if !text.is_empty() {
-                    events.push(BedrockStreamEvent::TextDelta(text.into()));
-                }
+            if let Some(text) = delta.get("text").and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                events.push(BedrockStreamEvent::TextDelta(text.into()));
             }
-            if let Some(input) = delta.get("toolUse").and_then(|t| t.get("input")).and_then(Value::as_str) {
+            if let Some(input) = delta
+                .get("toolUse")
+                .and_then(|t| t.get("input"))
+                .and_then(Value::as_str)
+            {
                 events.push(BedrockStreamEvent::ToolInputDelta(input.into()));
             }
         }
@@ -375,8 +367,16 @@ fn parse_bedrock_event(event: &BedrockEvent) -> Result<Vec<BedrockStreamEvent>> 
             let start = value.get("start").unwrap_or(value);
             if let Some(tool_use) = start.get("toolUse") {
                 events.push(BedrockStreamEvent::ToolStart {
-                    name: tool_use.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                    call_id: tool_use.get("toolUseId").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                    name: tool_use
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    call_id: tool_use
+                        .get("toolUseId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
                 });
             }
         }
@@ -388,7 +388,6 @@ fn parse_bedrock_event(event: &BedrockEvent) -> Result<Vec<BedrockStreamEvent>> 
 
     Ok(events)
 }
-
 
 /// Bedrock uses the AWS event-stream binary protocol over HTTP.
 struct EventStreamDecoder {
@@ -565,14 +564,10 @@ fn sign_request(
     let signed_headers: Vec<&str> = headers.keys().map(String::as_str).collect();
     let signed_headers_str = signed_headers.join(";");
 
-    let canonical_headers: String = headers
-        .iter()
-        .map(|(k, v)| format!("{k}:{v}\n"))
-        .collect();
+    let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
 
-    let canonical_request = format!(
-        "{method}\n{path}\n\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
-    );
+    let canonical_request =
+        format!("{method}\n{path}\n\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}");
 
     let credential_scope = format!("{date}/{region}/{service}/aws4_request");
     let string_to_sign = format!(
@@ -621,9 +616,7 @@ fn format_datetime(time: SystemTime) -> String {
     // Days since Unix epoch to Y/M/D (simplified calendar arithmetic)
     let (year, month, day) = days_to_ymd(days);
 
-    format!(
-        "{year:04}{month:02}{day:02}T{hours:02}{minutes:02}{seconds:02}Z"
-    )
+    format!("{year:04}{month:02}{day:02}T{hours:02}{minutes:02}{seconds:02}Z")
 }
 
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
@@ -721,7 +714,9 @@ mod tests {
 
         let registry = ProviderRegistry::from_environment().unwrap();
         let request = ResponseRequest {
-            input: vec![build_message_item("user", "What is 2+2? Reply with just the number.").unwrap()],
+            input: vec![
+                build_message_item("user", "What is 2+2? Reply with just the number.").unwrap(),
+            ],
             context,
             model: Some("us.anthropic.claude-sonnet-4-6".into()),
             instructions: String::new(),
@@ -730,6 +725,7 @@ mod tests {
             reasoning_effort: None,
             text_verbosity: "low".into(),
             text_format: None,
+            context_management: None,
         };
 
         let mut machine = ResponseMachine::new(&registry, request).unwrap();

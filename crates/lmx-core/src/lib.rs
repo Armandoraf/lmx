@@ -25,10 +25,11 @@ pub use images::{
 pub use keying::{WHITE_KEY_HEX, prompt_for_white_key, remove_white_key_background};
 pub use providers::{Provider, ProviderRegistry, ProviderSpec, RequestContext};
 pub use response::{
-    CoreEvent, NextAction, ResponseFrame, ResponseMachine, ResponseRequest, ResponseResult,
-    RoundResult, ToolCall, ToolOutput, WireRequest, build_message_item, execute_round,
-    execute_round_with_cancellation, execute_round_with_observer, normalize_tool_output,
-    output_text_from_items, tool_failure_output,
+    ContextManagement, CoreEvent, InferenceHistoryUpdate, NextAction, ResponseFrame,
+    ResponseMachine, ResponseRequest, ResponseResult, ResponseUsage, RoundResult, ToolCall,
+    ToolOutput, WireRequest, build_message_item, execute_round, execute_round_with_cancellation,
+    execute_round_with_observer, normalize_tool_output, output_text_from_items,
+    tool_failure_output,
 };
 pub use tokio_util::sync::CancellationToken;
 pub use transport::OpenAiTransport;

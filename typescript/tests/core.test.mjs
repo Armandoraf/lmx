@@ -22,7 +22,7 @@ import {
 } from '../dist/index.js';
 
 test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.2.9');
+  assert.equal(version(), '0.3.0');
 });
 
 async function withServer(handler, run) {
@@ -48,7 +48,18 @@ test('the Rust response engine preserves tool-round state', async () => {
         ? { type: 'function_call', call_id: 'call_add', name: 'add', arguments: '{"a":2,"b":3}' }
         : { type: 'message', role: 'assistant', content: 'five' };
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(`data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item })}\n\ndata: ${JSON.stringify({ type: 'response.completed' })}\n\n`);
+      response.end(`data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item })}\n\ndata: ${JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: `resp_${requests.length}`,
+          usage: {
+            input_tokens: requests.length * 100,
+            input_tokens_details: { cached_tokens: 25, cache_write_tokens: 5 },
+            output_tokens: 10,
+            total_tokens: requests.length * 100 + 10,
+          },
+        },
+      })}\n\n`);
     });
   }, async baseUrl => {
     for await (const event of streamResponse({
@@ -70,6 +81,17 @@ test('the Rust response engine preserves tool-round state', async () => {
       output: '{"sum":5}',
     },
   );
+  const completed = events.at(-1);
+  assert.equal(completed.responseId, 'resp_2');
+  assert.deepEqual(completed.usage, {
+    inputTokens: 200,
+    cachedInputTokens: 25,
+    cacheWriteInputTokens: 5,
+    outputTokens: 10,
+    totalTokens: 210,
+  });
+  assert.equal(completed.historyUpdate.type, 'append');
+  assert.equal(completed.historyUpdate.items.length, 3);
 });
 
 test('streamResponse yields a text delta before the SSE stream completes', async () => {
