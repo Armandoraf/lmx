@@ -33,7 +33,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.5.0';
+const packageVersion = '0.5.1';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -80,6 +80,7 @@ export type ProviderSpec = {
   defaultModel: string;
   availableModels: string[];
   modelDetails: ModelSpec[];
+  discoveryError?: string;
   baseUrl?: string;
   capabilities: ProviderCapabilities;
 };
