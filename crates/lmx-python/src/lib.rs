@@ -31,6 +31,47 @@ fn provider_registry_json() -> PyResult<String> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (context_json=None))]
+fn discover_provider_registry_json(
+    py: Python<'_>,
+    context_json: Option<String>,
+) -> PyResult<String> {
+    py.detach(move || {
+        let context = context_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(api_error)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(api_error)?;
+        Ok(runtime
+            .block_on(ProviderRegistry::discover_with_context(context.as_ref()))
+            .map_err(api_error)?
+            .as_json()
+            .to_string())
+    })
+}
+
+#[pyfunction]
+fn prepare_response_request_json(py: Python<'_>, request_json: String) -> PyResult<String> {
+    py.detach(move || {
+        let request = serde_json::from_str(&request_json).map_err(api_error)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(api_error)?;
+        serde_json::to_string(
+            &runtime
+                .block_on(lmx_core::prepare_response_request(request))
+                .map_err(api_error)?,
+        )
+        .map_err(api_error)
+    })
+}
+
+#[pyfunction]
 fn load_request_context_json(provider_json: &str) -> PyResult<String> {
     let provider = serde_json::from_str(provider_json).map_err(api_error)?;
     serde_json::to_string(&load_request_context(provider).map_err(api_error)?).map_err(api_error)
@@ -324,6 +365,8 @@ impl Drop for ResponseSession {
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(version, module)?)?;
     module.add_function(wrap_pyfunction!(provider_registry_json, module)?)?;
+    module.add_function(wrap_pyfunction!(discover_provider_registry_json, module)?)?;
+    module.add_function(wrap_pyfunction!(prepare_response_request_json, module)?)?;
     module.add_function(wrap_pyfunction!(load_request_context_json, module)?)?;
     module.add_function(wrap_pyfunction!(build_message_item_json, module)?)?;
     module.add_function(wrap_pyfunction!(output_text_from_items_json, module)?)?;

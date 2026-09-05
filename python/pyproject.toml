@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "lmx-sdk"
-version = "0.4.0"
+version = "0.5.0"
 description = "Unified Python client for documented LLM provider APIs"
 requires-python = ">=3.11"
 license = { file = "../LICENSE" }

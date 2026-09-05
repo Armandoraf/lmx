@@ -7,7 +7,8 @@ import * as native from '../native.js';
 type Native = {
   version(): string;
   providerRegistryJson(): string;
-  discoverProviderRegistryJson(): Promise<string>;
+  discoverProviderRegistryJson(context?: string): Promise<string>;
+  prepareResponseRequestJson(request: string): Promise<string>;
   loadRequestContextJson(provider: string): string;
   buildMessageItemJson(role: string, text: string): string;
   outputTextFromItemsJson(items: string): string;
@@ -32,7 +33,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.4.0';
+const packageVersion = '0.5.0';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -78,8 +79,19 @@ export type ProviderSpec = {
   provider: ProviderName;
   defaultModel: string;
   availableModels: string[];
+  modelDetails: ModelSpec[];
   baseUrl?: string;
   capabilities: ProviderCapabilities;
+};
+export type ModelSpec = {
+  id: string;
+  displayName: string;
+  contextWindow: number | null;
+  compactThreshold: number | null;
+  reasoningEfforts: string[];
+  defaultReasoningEffort: string | null;
+  supportsImages: boolean;
+  supportsToolSearch: boolean;
 };
 export type ToolOutputContentItem =
   | { type: 'input_text'; text: string }
@@ -161,8 +173,8 @@ export const providerRegistry = (): ProviderSpec[] =>
   JSON.parse(core.providerRegistryJson()) as ProviderSpec[];
 
 /** Resolve account-visible provider models and cache them in the native engine. */
-export const discoverProviderRegistry = async (): Promise<ProviderSpec[]> =>
-  JSON.parse(await core.discoverProviderRegistryJson()) as ProviderSpec[];
+export const discoverProviderRegistry = async (context?: RequestContext): Promise<ProviderSpec[]> =>
+  JSON.parse(await core.discoverProviderRegistryJson(context ? JSON.stringify(context) : undefined)) as ProviderSpec[];
 
 export const availableProviders = (): ProviderName[] =>
   providerRegistry().map(({ provider }) => provider);
@@ -372,7 +384,8 @@ export async function* streamResponse(request: ResponseRequest): AsyncGenerator<
     payload.context = loadRequestContext(payload.provider);
     delete payload.provider;
   }
-  const session = new core.ResponseSession(JSON.stringify(payload));
+  const prepared = await awaitWithSignal(core.prepareResponseRequestJson(JSON.stringify(payload)), signal);
+  const session = new core.ResponseSession(prepared);
   const cancel = () => session.cancel();
   if (signal?.aborted) cancel();
   else signal?.addEventListener('abort', cancel, { once: true });

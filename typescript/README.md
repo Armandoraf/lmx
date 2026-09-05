@@ -19,8 +19,22 @@ const result = await respond({
 console.log(result.outputText);
 ```
 
-Set `OPENAI_API_KEY` before running this example. LMX supports documented
-provider credentials only; it does not reuse ChatGPT or Codex OAuth tokens.
+Set `OPENAI_API_KEY` before running this example. Codex calls instead accept
+request-scoped ChatGPT credentials supplied by the host.
+
+`await discoverProviderRegistry(codexContext)` returns account-visible Codex
+models and `modelDetails` (context window, compaction threshold, reasoning
+efforts, image inputs, and tool search). Discovery is cached for five minutes
+per credential identity, with concurrent lookups coalesced. Tokens are never
+persisted. Hidden models and the multi-agent Ultra mode are not exposed.
+
+OpenAI API models are discovered from `/v1/models` when `OPENAI_API_KEY` is set.
+That endpoint supplies names but no context or reasoning metadata. `CODEX_MODELS`
+optionally restricts the discovered Codex catalog; `OPENAI_MODELS` provides an
+explicit API catalog. Configured defaults do not change when new models appear.
+
+Codex responses automatically use Standard Responses and catalog-derived server
+compaction. Callers no longer need model-name checks or compaction constants.
 
 See the [repository README](https://github.com/Armandoraf/lmx#readme) for
 providers, Python usage, development, and security reporting.

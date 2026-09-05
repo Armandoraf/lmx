@@ -17,6 +17,8 @@ from ._native import (
     load_request_context_json,
     output_text_from_items_json,
     provider_registry_json,
+    discover_provider_registry_json,
+    prepare_response_request_json,
     normalize_tool_output_json,
     tool_failure_output_json,
     version,
@@ -32,6 +34,7 @@ __all__ = [
     "load_request_context",
     "output_text_from_items",
     "provider_registry",
+    "discover_provider_registry",
     "respond",
     "structured_response",
     "stream_response",
@@ -42,6 +45,11 @@ __all__ = [
 def provider_registry() -> list[dict[str, Any]]:
     """Return provider defaults from the shared Rust core."""
     return json.loads(provider_registry_json())
+
+
+def discover_provider_registry(context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Discover account-visible models and metadata using caller-supplied credentials."""
+    return json.loads(discover_provider_registry_json(json.dumps(context) if context else None))
 
 
 def load_request_context(provider: str) -> dict[str, Any]:
@@ -136,7 +144,7 @@ def stream_response(request: dict[str, Any]):
     payload = {key: value for key, value in request.items() if key not in {"toolHandlers", "tool_handlers", "observer"}}
     if "context" not in payload and "provider" in payload:
         payload["context"] = load_request_context(str(payload.pop("provider")))
-    session = ResponseSession(json.dumps(payload))
+    session = ResponseSession(prepare_response_request_json(json.dumps(payload)))
     try:
         while True:
             session.start_round()

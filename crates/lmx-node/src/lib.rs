@@ -32,12 +32,28 @@ pub fn provider_registry_json() -> Result<String> {
 }
 
 #[napi]
-pub async fn discover_provider_registry_json() -> Result<String> {
-    Ok(ProviderRegistry::discover()
+pub async fn discover_provider_registry_json(context_json: Option<String>) -> Result<String> {
+    let context = context_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(napi_error)?;
+    Ok(ProviderRegistry::discover_with_context(context.as_ref())
         .await
         .map_err(napi_error)?
         .as_json()
         .to_string())
+}
+
+#[napi]
+pub async fn prepare_response_request_json(request_json: String) -> Result<String> {
+    let request = serde_json::from_str(&request_json).map_err(napi_error)?;
+    serde_json::to_string(
+        &lmx_core::prepare_response_request(request)
+            .await
+            .map_err(napi_error)?,
+    )
+    .map_err(napi_error)
 }
 
 #[napi]

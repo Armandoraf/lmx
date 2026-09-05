@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -21,8 +21,9 @@ import {
   version
 } from '../dist/index.js';
 
-test('the JavaScript package and native binding report the same release version', () => {
-  assert.equal(version(), '0.4.0');
+test('the JavaScript package and native binding report the same release version', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(version(), manifest.version);
 });
 
 async function withServer(handler, run) {

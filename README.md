@@ -36,9 +36,10 @@ const result = await respond({
 });
 ```
 
-ChatGPT OAuth GPT-5.6 requests use the Lite transport by default. Hosts can
-opt into the Standard Responses transport and its native server compaction
-without any protocol fallback:
+Codex response calls discover the caller's visible models and default to Standard
+Responses with server compaction at the catalog's threshold (or 90% of its default
+context window). New models require no LMX release. Explicit transport and
+compaction settings still take precedence:
 
 ```ts
 const result = await respond({

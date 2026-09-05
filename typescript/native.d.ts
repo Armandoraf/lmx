@@ -19,7 +19,7 @@ export declare function buildMessageItemJson(role: string, text: string): string
 
 export declare function buildWireRequestJson(requestJson: string): string
 
-export declare function discoverProviderRegistryJson(): Promise<string>
+export declare function discoverProviderRegistryJson(contextJson?: string | undefined | null): Promise<string>
 
 export declare function generateImageJson(requestJson: string): Promise<string>
 
@@ -32,6 +32,8 @@ export declare function loadRequestContextJson(providerJson: string): string
 export declare function normalizeToolOutputJson(callId: string, valueJson: string): string
 
 export declare function outputTextFromItemsJson(itemsJson: string): string
+
+export declare function prepareResponseRequestJson(requestJson: string): Promise<string>
 
 export declare function providerRegistryJson(): string
 

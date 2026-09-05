@@ -47,6 +47,8 @@ pub struct ProviderSpec {
     pub provider: Provider,
     pub default_model: String,
     pub available_models: Vec<String>,
+    #[serde(default)]
+    pub model_details: Vec<crate::ModelSpec>,
     pub base_url: Option<String>,
     pub capabilities: ProviderCapabilities,
 }
@@ -106,11 +108,12 @@ impl Default for ProviderRegistry {
 
 impl ProviderRegistry {
     pub fn from_environment() -> Result<Self> {
-        if let Some((_, registry)) = DISCOVERED_REGISTRY
+        if let Some((at, registry)) = DISCOVERED_REGISTRY
             .get_or_init(|| Mutex::new(None))
             .lock()
             .map_err(|_| Error::State("provider registry cache is unavailable".into()))?
             .clone()
+            && at.elapsed() < DISCOVERY_TTL
         {
             return Ok(registry);
         }
@@ -186,12 +189,54 @@ impl ProviderRegistry {
         if std::env::var_os("NANOGPT_API_KEY").is_some() {
             registry.replace_models(Provider::Nanogpt, discover_nanogpt_models().await?)?;
         }
+        if std::env::var_os("OPENAI_API_KEY").is_some()
+            && std::env::var_os("OPENAI_MODELS").is_none()
+        {
+            let context = crate::load_request_context(Provider::Openai)?;
+            registry
+                .set_model_details(Provider::Openai, crate::discover_models(&context).await?)?;
+        }
         *DISCOVERED_REGISTRY
             .get_or_init(|| Mutex::new(None))
             .lock()
             .map_err(|_| Error::State("provider registry cache is unavailable".into()))? =
             Some((Instant::now(), registry.clone()));
         Ok(registry)
+    }
+
+    pub async fn discover_with_context(context: Option<&RequestContext>) -> Result<Self> {
+        let mut registry = Self::discover().await?;
+        if let Some(context) = context {
+            let mut models = crate::discover_models(context).await?;
+            let env = match context.provider {
+                Provider::Codex => "CODEX_MODELS",
+                _ => "OPENAI_MODELS",
+            };
+            if let Ok(value) = std::env::var(env) {
+                let allowed: Vec<_> = value.split(',').map(str::trim).collect();
+                models.retain(|model| allowed.contains(&model.id.as_str()));
+            }
+            registry.set_model_details(context.provider.clone(), models)?;
+        }
+        Ok(registry)
+    }
+
+    fn set_model_details(
+        &mut self,
+        provider: Provider,
+        models: Vec<crate::ModelSpec>,
+    ) -> Result<()> {
+        let original_default = self.get(&provider)?.default_model.clone();
+        self.replace_models(
+            provider.clone(),
+            models.iter().map(|m| m.id.clone()).collect(),
+        )?;
+        let spec = self.specs.get_mut(&provider).expect("registered provider");
+        if spec.available_models.contains(&original_default) {
+            spec.default_model = original_default;
+        }
+        spec.model_details = models;
+        Ok(())
     }
 
     fn replace_models(&mut self, provider: Provider, models: Vec<String>) -> Result<()> {
@@ -232,6 +277,7 @@ impl ProviderRegistry {
                 provider: Provider::Bedrock,
                 default_model: bedrock_models[0].clone(),
                 available_models: bedrock_models,
+                model_details: vec![],
                 base_url: None,
                 capabilities: ProviderCapabilities {
                     supports_tools: true,
@@ -249,6 +295,7 @@ impl ProviderRegistry {
                 provider: Provider::Codex,
                 default_model: codex_models[0].clone(),
                 available_models: codex_models,
+                model_details: vec![],
                 base_url: Some("https://chatgpt.com/backend-api/codex".into()),
                 capabilities: capabilities.clone(),
             },
@@ -259,6 +306,7 @@ impl ProviderRegistry {
                 provider: Provider::Openai,
                 default_model: openai_models[0].clone(),
                 available_models: openai_models,
+                model_details: vec![],
                 base_url: Some("https://api.openai.com/v1".into()),
                 capabilities: capabilities.clone(),
             },
@@ -269,6 +317,7 @@ impl ProviderRegistry {
                 provider: Provider::Nanogpt,
                 default_model: nanogpt_models[0].clone(),
                 available_models: nanogpt_models,
+                model_details: vec![],
                 base_url: Some("https://nano-gpt.com/api/v1".into()),
                 capabilities: capabilities.clone(),
             },
@@ -279,6 +328,7 @@ impl ProviderRegistry {
                 provider: Provider::Azure,
                 default_model: azure_models[0].clone(),
                 available_models: azure_models,
+                model_details: vec![],
                 base_url: None,
                 capabilities,
             },

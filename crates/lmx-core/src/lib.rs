@@ -5,6 +5,7 @@
 
 mod auth;
 pub mod bedrock;
+mod catalog;
 mod endpoint;
 mod error;
 mod images;
@@ -16,6 +17,7 @@ mod video;
 
 pub use auth::{load_request_context, normalize_azure_endpoint};
 pub use bedrock::{BedrockCredentials, BedrockRequest, BedrockTransport, CompletedToolCall};
+pub use catalog::{ModelSpec, discover_models, prepare_response_request};
 pub use endpoint::endpoint_url;
 pub use error::{Error, Result};
 pub use images::{

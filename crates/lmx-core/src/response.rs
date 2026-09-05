@@ -282,7 +282,10 @@ impl ResponseMachine {
             .model
             .clone()
             .unwrap_or_else(|| spec.default_model.clone());
-        if !spec
+        if !matches!(
+            request.context.provider,
+            crate::Provider::Codex | crate::Provider::Openai
+        ) && !spec
             .available_models
             .iter()
             .any(|candidate| candidate == &model)
@@ -304,13 +307,10 @@ impl ResponseMachine {
                 "native structured output",
             ));
         }
-        if request.codex_protocol.is_some()
-            && !(request.context.provider == crate::Provider::Codex
-                && model.starts_with("gpt-5.6-"))
-        {
+        if request.codex_protocol.is_some() && request.context.provider != crate::Provider::Codex {
             return Err(Error::UnsupportedCapability(
                 spec.provider.as_str().into(),
-                "GPT-5.6 Codex Responses protocol selection",
+                "Codex Responses protocol selection",
             ));
         }
         let codex_protocol = request
@@ -328,7 +328,6 @@ impl ResponseMachine {
                 ));
             }
             let supported = request.context.provider == crate::Provider::Codex
-                && model.starts_with("gpt-5.6-")
                 && matches!(
                     (codex_protocol, management),
                     (
@@ -528,7 +527,6 @@ impl ResponseMachine {
 
     fn uses_codex_responses_lite(&self) -> bool {
         self.request.context.provider == crate::Provider::Codex
-            && self.model.starts_with("gpt-5.6-")
             && self
                 .request
                 .codex_protocol
@@ -538,7 +536,6 @@ impl ResponseMachine {
 
     fn uses_codex_responses_standard(&self) -> bool {
         self.request.context.provider == crate::Provider::Codex
-            && self.model.starts_with("gpt-5.6-")
             && self.request.codex_protocol == Some(CodexProtocol::ResponsesStandard)
     }
 
@@ -891,7 +888,7 @@ fn retain_compaction_messages(items: &[ResponseItem], budget: u64) -> Vec<Respon
     retained
 }
 
-fn validate_request_context(context: &RequestContext) -> Result<()> {
+pub(crate) fn validate_request_context(context: &RequestContext) -> Result<()> {
     if context.provider == crate::Provider::Bedrock {
         if context
             .headers
