@@ -108,7 +108,7 @@ impl Take {
         let offset = self.pcm.len() / 2;
         self.pcm.extend(bytes);
         // Carry an incomplete sample across delta boundaries.
-        for (i, sample) in self.pcm[offset * 2..].chunks_exact(2).enumerate() {
+        for (i, sample) in self.pcm[offset * 2..].as_chunks::<2>().0.iter().enumerate() {
             if i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs() > 64 {
                 self.first_sound.get_or_insert(offset + i);
                 self.last_sound = offset + i + 1;
