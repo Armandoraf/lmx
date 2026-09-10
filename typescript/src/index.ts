@@ -37,7 +37,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.6.0';
+const packageVersion = '0.7.0';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -341,7 +341,7 @@ export type VideoResult = {
   contentType: string;
 };
 
-export type SpeechFormat = 'wav' | 'mp3' | 'opus' | 'aac' | 'flac' | 'pcm';
+export type SpeechFormat = 'wav' | 'pcm';
 export type SpeechRequest = {
   provider?: ProviderName;
   context?: RequestContext;
@@ -350,7 +350,6 @@ export type SpeechRequest = {
   voice: string;
   instructions?: string;
   format?: SpeechFormat;
-  speed?: number;
   signal?: AbortSignal;
 };
 export type SpeechResult = {
@@ -359,9 +358,11 @@ export type SpeechResult = {
   format: SpeechFormat;
   content: Uint8Array;
   contentType: string;
+  transcript: string;
+  usage: Record<string, unknown> | null;
 };
 
-/** Generate a recording through the shared Rust core. Defaults to WAV. */
+/** Record a transcript-checked GPT-Live performance. Defaults to 24 kHz mono WAV. */
 export async function generateSpeech(request: SpeechRequest): Promise<SpeechResult> {
   const { signal, provider, context, ...options } = request;
   if (signal?.aborted) throw abortError(signal);

@@ -338,7 +338,10 @@ impl ProviderRegistry {
                 model_details: vec![],
                 discovery_error: None,
                 base_url: Some("https://chatgpt.com/backend-api/codex".into()),
-                capabilities: capabilities.clone(),
+                capabilities: ProviderCapabilities {
+                    supports_speech: true,
+                    ..capabilities.clone()
+                },
             },
         );
         specs.insert(

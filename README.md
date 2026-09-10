@@ -125,13 +125,14 @@ completed images.
 
 OpenAI speech generation uses the same Rust engine and credential handling as
 other media APIs. TypeScript returns `Uint8Array`; Python returns `bytes`.
-The default model is `gpt-4o-mini-tts` and the default format is WAV.
+Defaults are `gpt-live-1` for `openai`, `gpt-live-1-codex` for `codex`, and
+24 kHz mono PCM16 WAV output.
 
 ```ts
 const recording = await generateSpeech({
   provider: 'openai',
   input: 'I thought you were gone.',
-  voice: 'cedar',
+  voice: 'gleam',
   instructions: 'Quiet relief, trying to sound casual.',
   format: 'wav',
   signal: abortController.signal,
@@ -139,11 +140,41 @@ const recording = await generateSpeech({
 ```
 
 Python exposes `lmx.generate_speech({...})` with the same request fields except
-`signal`. Both return `content`, `contentType`, `model`, `voice`, and `format`.
-Supported formats are WAV, MP3, Opus, AAC, FLAC, and raw PCM. Optional `speed`
-ranges from 0.25 to 4. Delivery instructions are separate from the spoken input.
-Use OpenAI API credentials; the Codex provider does not support speech.
-This API generates recordings; it does not create a live voice session.
+`signal`. Both return `content`, `contentType`, `model`, `voice`, `format`,
+`transcript`, and provider-reported final `usage` (or `null` when absent).
+Formats are WAV and raw PCM.
+Delivery instructions control tone and pace separately from the spoken input.
+The `openai` provider uses a Platform API key and a public Live WebSocket session.
+For subscription voice, pass a `codex` request context instead:
+
+```ts
+const recording = await generateSpeech({
+  context: {
+    provider: 'codex',
+    apiKey: accessToken,
+    headers: { 'ChatGPT-Account-ID': accountId },
+  },
+  voice: 'cove',
+  input: 'I thought you were gone.',
+  instructions: 'Quiet relief.',
+});
+```
+
+Codex uses ChatGPT call creation, native WebRTC/Opus media and a Live control
+WebSocket. Voices are `arbor`, `breeze`, `cove`, `ember`, `juniper`, `maple`,
+`sol`, `spruce`, and `vale`. This is Codex's subscription integration, not the
+public Platform API contract. LMX never reads, stores or refreshes OAuth tokens;
+the caller owns credentials and their lifecycle. There is no credential fallback.
+Neither path calls a reasoning backend. Silent input advances the session clock.
+LMX checks transcript words against the script (ignoring case/punctuation), waits
+for two seconds of PCM silence, requests closure, and waits for `session.closed`.
+Changed words, missing audio, moderation, incomplete finalization, and a 120-second
+take deadline fail instead of returning a partial recording. Silence detection
+is an application heuristic, not a Live completion event; audition recordings.
+Leading/trailing silence is trimmed with 200 ms padding. API errors are not retried.
+Codex packet loss/reordering fails a take rather than silently damaging the recording.
+Native packages bundle Opus; consumers need no Python, browser, or system codec.
+See the [Live session documentation](https://developers.openai.com/api/docs/guides/live-conversations).
 
 ## Architecture
 

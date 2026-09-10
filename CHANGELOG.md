@@ -2,6 +2,22 @@
 
 All notable changes to LMX are documented here.
 
+## [0.7.0] - 2026-09-10
+
+- Add Codex OAuth speech using `gpt-live-1-codex`, native WebRTC/Opus audio,
+  and authenticated Live sideband control. Credentials remain caller-owned.
+- Expose Codex speech capability; return provider usage only when reported.
+
+- Replace the speech endpoint with bounded `gpt-live-1` WebSocket recordings.
+- Preserve scripted text separately from performance directions; return matched
+  output transcripts and final voice-session usage with recorded audio.
+- Keep the audio clock advancing with paced silent input, use transcript plus
+  PCM-silence completion detection, and require graceful session finalization.
+- Support 24 kHz mono PCM16 as WAV or raw PCM. Set speaking pace through
+  instructions; compressed formats and numeric speed are no longer accepted.
+- Test session flow, late transcripts, split samples, paraphrases, moderation,
+  cancellation, authentication failures, and premature transport closure.
+
 ## [0.6.0] - 2026-09-10
 
 - Add OpenAI speech generation in the Rust core, exposed as TypeScript
