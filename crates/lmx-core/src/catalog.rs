@@ -135,10 +135,10 @@ pub async fn discover_models(context: &RequestContext) -> Result<Vec<ModelSpec>>
     };
     // Coalesce requests for one identity without blocking discovery for other accounts.
     let mut cached = entry.lock().await;
-    if let Some((at, models)) = cached.as_ref() {
-        if at.elapsed() < TTL {
-            return Ok(models.clone());
-        }
+    if let Some((at, models)) = cached.as_ref()
+        && at.elapsed() < TTL
+    {
+        return Ok(models.clone());
     }
     let base = match context.provider {
         Provider::Codex => "https://chatgpt.com/backend-api/codex",
@@ -246,10 +246,9 @@ fn apply_model_defaults(
         auto_compact_token_limit,
         ..
     }) = &mut request.context_management
+        && auto_compact_token_limit.is_none()
     {
-        if auto_compact_token_limit.is_none() {
-            *auto_compact_token_limit = model.compact_threshold;
-        }
+        *auto_compact_token_limit = model.compact_threshold;
     }
     if request.context_management.is_none()
         && request.codex_protocol == Some(crate::CodexProtocol::ResponsesStandard)
@@ -310,7 +309,7 @@ mod tests {
             "context": {"provider":"codex", "apiKey":"test", "headers":{"ChatGPT-Account-ID":"account"}},
             "model":"gpt-7-next", "input":[], "instructions":"Work", "tools":[{"type":"function","name":"work"}]
         })).unwrap();
-        let prepared = apply_model_defaults(request.clone(), &[model.clone()]).unwrap();
+        let prepared = apply_model_defaults(request.clone(), std::slice::from_ref(&model)).unwrap();
         let wire = crate::ResponseMachine::new(&crate::ProviderRegistry::default(), prepared)
             .unwrap()
             .wire_request()
@@ -330,7 +329,7 @@ mod tests {
         explicit.context_management = Some(crate::ContextManagement::Server {
             compact_threshold: 10000,
         });
-        let explicit = apply_model_defaults(explicit, &[model.clone()]).unwrap();
+        let explicit = apply_model_defaults(explicit, std::slice::from_ref(&model)).unwrap();
         assert!(matches!(
             explicit.context_management,
             Some(crate::ContextManagement::Server {
