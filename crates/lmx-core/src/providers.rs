@@ -37,6 +37,7 @@ pub struct ProviderCapabilities {
     pub supports_structured_output: bool,
     pub supports_streaming: bool,
     pub supports_images: bool,
+    pub supports_speech: bool,
     pub supports_pdf: bool,
     pub supports_reasoning: bool,
 }
@@ -303,6 +304,7 @@ impl ProviderRegistry {
             supports_structured_output: true,
             supports_streaming: true,
             supports_images: true,
+            supports_speech: false,
             supports_pdf: true,
             supports_reasoning: true,
         };
@@ -321,6 +323,7 @@ impl ProviderRegistry {
                     supports_structured_output: true,
                     supports_streaming: true,
                     supports_images: false,
+                    supports_speech: false,
                     supports_pdf: true,
                     supports_reasoning: true,
                 },
@@ -347,7 +350,10 @@ impl ProviderRegistry {
                 model_details: vec![],
                 discovery_error: None,
                 base_url: Some("https://api.openai.com/v1".into()),
-                capabilities: capabilities.clone(),
+                capabilities: ProviderCapabilities {
+                    supports_speech: true,
+                    ..capabilities.clone()
+                },
             },
         );
         specs.insert(

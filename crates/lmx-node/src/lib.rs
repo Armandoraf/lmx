@@ -100,6 +100,42 @@ pub async fn generate_image_json(request_json: String) -> Result<String> {
 }
 
 #[napi]
+pub struct SpeechSession {
+    request: lmx_core::SpeechRequest,
+    cancellation: CancellationToken,
+}
+
+#[napi]
+impl SpeechSession {
+    #[napi(constructor)]
+    pub fn new(request_json: String) -> Result<Self> {
+        Ok(Self {
+            request: serde_json::from_str(&request_json).map_err(napi_error)?,
+            cancellation: CancellationToken::new(),
+        })
+    }
+
+    #[napi]
+    pub async fn execute_json(&self) -> Result<String> {
+        let result = lmx_core::generate_speech(self.request.clone(), &self.cancellation)
+            .await
+            .map_err(napi_error)?;
+        serde_json::to_string(&result).map_err(napi_error)
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+}
+
+impl Drop for SpeechSession {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+#[napi]
 pub async fn generate_images_json(request_json: String) -> Result<String> {
     let request: ImageRequest = serde_json::from_str(&request_json).map_err(napi_error)?;
     serde_json::to_string(&generate_images(request).await.map_err(napi_error)?).map_err(napi_error)

@@ -14,6 +14,7 @@ from ._native import (
     generate_image_json,
     generate_images_json,
     generate_video_json,
+    generate_speech_json,
     load_request_context_json,
     output_text_from_items_json,
     provider_registry_json,
@@ -31,6 +32,7 @@ __all__ = [
     "generate_images",
     "stream_image",
     "generate_video",
+    "generate_speech",
     "load_request_context",
     "output_text_from_items",
     "provider_registry",
@@ -76,6 +78,16 @@ def generate_image(request: dict[str, Any]) -> dict[str, Any]:
     if "context" not in payload and "provider" in payload:
         payload["context"] = load_request_context(str(payload.pop("provider")))
     result = json.loads(generate_image_json(json.dumps(payload)))
+    result["content"] = b64decode(result.pop("contentBase64"))
+    return result
+
+
+def generate_speech(request: dict[str, Any]) -> dict[str, Any]:
+    """Generate spoken audio; return bytes in content. Defaults to WAV."""
+    payload = dict(request)
+    if "context" not in payload and "provider" in payload:
+        payload["context"] = load_request_context(str(payload.pop("provider")))
+    result = json.loads(generate_speech_json(json.dumps(payload)))
     result["content"] = b64decode(result.pop("contentBase64"))
     return result
 

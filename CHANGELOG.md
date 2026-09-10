@@ -2,6 +2,14 @@
 
 All notable changes to LMX are documented here.
 
+## [0.6.0] - 2026-09-10
+
+- Add OpenAI speech generation in the Rust core, exposed as TypeScript
+  `generateSpeech` and Python `generate_speech`, returning audio bytes and metadata.
+- Support voice, delivery instructions, output format, and speaking speed;
+  TypeScript requests support cancellation throughout the audio download.
+- Expose provider speech capability separately from text and image inference.
+
 ## [0.4.0] - 2026-08-15
 
 - Add an explicit `responses_standard` Codex transport for ChatGPT OAuth,

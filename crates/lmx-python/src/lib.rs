@@ -223,6 +223,24 @@ fn generate_video_json(request_json: &str) -> PyResult<String> {
     .map_err(api_error)
 }
 
+#[pyfunction]
+fn generate_speech_json(py: Python<'_>, request_json: &str) -> PyResult<String> {
+    let request: lmx_core::SpeechRequest = serde_json::from_str(request_json).map_err(api_error)?;
+    py.detach(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(api_error)?;
+        let result = runtime
+            .block_on(lmx_core::generate_speech(
+                request,
+                &CancellationToken::new(),
+            ))
+            .map_err(api_error)?;
+        serde_json::to_string(&result).map_err(api_error)
+    })
+}
+
 #[pyclass]
 struct ResponseSession {
     cancellation: CancellationToken,
@@ -376,6 +394,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(generate_image_json, module)?)?;
     module.add_function(wrap_pyfunction!(generate_images_json, module)?)?;
     module.add_function(wrap_pyfunction!(generate_video_json, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_speech_json, module)?)?;
     module.add_class::<ResponseSession>()?;
     module.add_class::<ImageStream>()?;
     Ok(())

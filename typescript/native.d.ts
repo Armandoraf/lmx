@@ -15,6 +15,12 @@ export declare class ResponseSession {
   nextFrameJson(): Promise<string>
 }
 
+export declare class SpeechSession {
+  constructor(requestJson: string)
+  executeJson(): Promise<string>
+  cancel(): void
+}
+
 export declare function buildMessageItemJson(role: string, text: string): string
 
 export declare function buildWireRequestJson(requestJson: string): string

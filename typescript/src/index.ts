@@ -22,6 +22,10 @@ type Native = {
     cancel(): void;
   };
   generateVideoJson(request: string): Promise<string>;
+  SpeechSession: new (request: string) => {
+    executeJson(): Promise<string>;
+    cancel(): void;
+  };
   ResponseSession: new (request: string) => {
     executeRoundJson(): Promise<string>;
     submitToolOutputsJson(outputs: string): string;
@@ -33,7 +37,7 @@ type Native = {
 
 const core = native as Native;
 
-const packageVersion = '0.5.1';
+const packageVersion = '0.6.0';
 
 if (core.version() !== packageVersion) {
   throw new Error(
@@ -72,6 +76,7 @@ export type ProviderCapabilities = {
   supportsStructuredOutput: boolean;
   supportsStreaming: boolean;
   supportsImages: boolean;
+  supportsSpeech: boolean;
   supportsPdf: boolean;
   supportsReasoning: boolean;
 };
@@ -335,6 +340,50 @@ export type VideoResult = {
   content: Uint8Array;
   contentType: string;
 };
+
+export type SpeechFormat = 'wav' | 'mp3' | 'opus' | 'aac' | 'flac' | 'pcm';
+export type SpeechRequest = {
+  provider?: ProviderName;
+  context?: RequestContext;
+  model?: string;
+  input: string;
+  voice: string;
+  instructions?: string;
+  format?: SpeechFormat;
+  speed?: number;
+  signal?: AbortSignal;
+};
+export type SpeechResult = {
+  model: string;
+  voice: string;
+  format: SpeechFormat;
+  content: Uint8Array;
+  contentType: string;
+};
+
+/** Generate a recording through the shared Rust core. Defaults to WAV. */
+export async function generateSpeech(request: SpeechRequest): Promise<SpeechResult> {
+  const { signal, provider, context, ...options } = request;
+  if (signal?.aborted) throw abortError(signal);
+  if (provider && context && provider !== context.provider) {
+    throw new Error('Speech provider and context must match');
+  }
+  if (!context && !provider) throw new Error('Speech requires a provider or context');
+  const session = new core.SpeechSession(JSON.stringify({
+    ...options, context: context ?? loadRequestContext(provider!),
+  }));
+  const cancel = () => session.cancel();
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    const { contentBase64, ...result } = JSON.parse(
+      await awaitWithSignal(session.executeJson(), signal),
+    ) as Omit<SpeechResult, 'content'> & { contentBase64: string };
+    return { ...result, content: Uint8Array.from(Buffer.from(contentBase64, 'base64')) };
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    session.cancel();
+  }
+}
 
 export const generateVideo = async (request: Record<string, unknown>): Promise<VideoResult> => {
   const payload = { ...request };

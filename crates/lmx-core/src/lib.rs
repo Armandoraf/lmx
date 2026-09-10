@@ -12,6 +12,7 @@ mod images;
 mod keying;
 mod providers;
 mod response;
+mod speech;
 mod transport;
 mod video;
 
@@ -33,6 +34,7 @@ pub use response::{
     execute_round_with_observer, normalize_tool_output, output_text_from_items,
     tool_failure_output,
 };
+pub use speech::{SpeechFormat, SpeechRequest, SpeechResult, generate_speech};
 pub use tokio_util::sync::CancellationToken;
 pub use transport::OpenAiTransport;
 pub use video::{VideoJob, VideoRequest, VideoResult, generate_video};

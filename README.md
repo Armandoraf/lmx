@@ -121,7 +121,31 @@ TypeScript. Both yield normalized text, output-item, tool-call, and completion
 events. `stream_image` / `streamImage` yield progressive image previews and
 completed images.
 
-## Design
+## Speech
+
+OpenAI speech generation uses the same Rust engine and credential handling as
+other media APIs. TypeScript returns `Uint8Array`; Python returns `bytes`.
+The default model is `gpt-4o-mini-tts` and the default format is WAV.
+
+```ts
+const recording = await generateSpeech({
+  provider: 'openai',
+  input: 'I thought you were gone.',
+  voice: 'cedar',
+  instructions: 'Quiet relief, trying to sound casual.',
+  format: 'wav',
+  signal: abortController.signal,
+});
+```
+
+Python exposes `lmx.generate_speech({...})` with the same request fields except
+`signal`. Both return `content`, `contentType`, `model`, `voice`, and `format`.
+Supported formats are WAV, MP3, Opus, AAC, FLAC, and raw PCM. Optional `speed`
+ranges from 0.25 to 4. Delivery instructions are separate from the spoken input.
+Use OpenAI API credentials; the Codex provider does not support speech.
+This API generates recordings; it does not create a live voice session.
+
+## Architecture
 
 ```text
 typed SDK request → ResponseMachine → WireRequest → provider transport
